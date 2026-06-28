@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">HypnoVibe</string>
+    <string name="tab_home">首页</string>
+    <string name="tab_playlist">播放</string>
+    <string name="tab_editor">打轴</string>
+    <string name="tab_device">设备</string>
+    <string name="empty_playlist">尚无播放列表</string>
+    <string name="empty_device">暂无已连接设备</string>
+    <string name="empty_history">暂无历史设备</string>
+    <string name="coming_soon">即将开放</string>
+    <string name="select_audio_and_config">选择音频文件和设备配置以开始编辑</string>
+    <string name="open_playlist_first">请先在播放列表中打开一个播放列表</string>
+</resources>

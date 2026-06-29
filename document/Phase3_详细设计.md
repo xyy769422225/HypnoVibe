@@ -1,6 +1,6 @@
-# Phase 3 详细设计：音频引擎 (Native C)
+# Phase 3 详细设计：音频引擎 (纯 Java AudioTrack + MediaCodec)
 
-> 阶段目标：实现基于 Oboe 的自研音频播放器，支持 MP3/WAV 解码、精确 seek 和毫秒级位置回调  
+> 阶段目标：实现基于 AudioTrack + MediaCodec 的流式音频播放器，支持任意音频格式、精确 seek 和毫秒级位置查询  
 > 产出物：可运行 APK，播放列表中点击播放即可听到音频，拖拽进度条可跳转
 
 ---
@@ -8,13 +8,12 @@
 ## 目录
 
 1. [架构概览](#1-架构概览)
-2. [Native C 层设计](#2-native-c-层设计)
-3. [JNI 桥接层](#3-jni-桥接层)
-4. [Java 封装层](#4-java-封装层)
-5. [UI 集成](#5-ui-集成)
-6. [构建配置](#6-构建配置)
-7. [文件清单](#7-文件清单)
-8. [验证标准](#8-验证标准)
+2. [流式解码播放设计](#2-流式解码播放设计)
+3. [Java AudioEngine 封装](#3-java-audioengine-封装)
+4. [UI 集成](#4-ui-集成)
+5. [构建配置](#5-构建配置)
+6. [文件清单](#6-文件清单)
+7. [验证标准](#7-验证标准)
 
 ---
 
@@ -26,370 +25,219 @@
 │  PlaylistDetailScreen → PlayerBar           │
 │             ↕ StateFlow                     │
 │  Java ViewModel                             │
-│  PlaySessionVM ←→ AudioEngine (JNI wrapper) │
+│  PlaySessionVM ←→ AudioEngine (纯 Java)      │
 ├────────────────────────────────────────────┤
-│  JNI Bridge                                 │
-│  AudioEngine.java → jni_bridge.c            │
-├────────────────────────────────────────────┤
-│  Native C (Oboe)                            │
-│  audio_engine.c — 播放控制                  │
-│  mp3_decoder.c — MP3→PCM                   │
-│  wav_decoder.c  — WAV→PCM                  │
-│  waveform_sampler.c — PCM→渲染数据点        │
+│  Java AudioEngine                           │
+│  MediaExtractor — 流式读取文件               │
+│  MediaCodec — 流式解码到 short[] PCM         │
+│  AudioTrack — 播放、进度查询、seek            │
+│  (全部运行在后台 HandlerThread)               │
 └────────────────────────────────────────────┘
 ```
 
 ---
 
-## 2. Native C 层设计
+## 2. 流式解码播放设计
 
-### 2.1 minimp3 集成
-
-[minimp3](https://github.com/lieff/minimp3) 是单头文件 MP3 解码器，无需编译链接。
+### 2.1 核心原理
 
 ```
-app/src/main/cpp/
-├── minimp3/
-│   └── minimp3.h          # 从 GitHub 下载，放入 cpp/minimp3/
-├── mp3_decoder.h
-└── mp3_decoder.c
+MediaExtractor(读文件块) → MediaCodec(解码) → AudioTrack.write(播放)
+        ↑ seek: seekTo + flush                    ↑ getPlaybackHeadPosition
 ```
 
-```c
-// mp3_decoder.h
-typedef struct {
-    mp3dec_t mp3d;
-    mp3dec_file_info_t info;
-    int16_t* pcm_buffer;   // 解码后的 PCM 16-bit buffer
-    size_t   pcm_size;     // 采样数
-    int      sample_rate;
-    int      channels;
-    int      is_loaded;
-} Mp3Decoder;
+- **流式**：不一次性加载全部 PCM 到内存。每轮解码 1 块，写入 AudioTrack，循环直到文件结束。内存占用 KB 级
+- **阻塞流控**：`AudioTrack.write()` 在缓冲区满时自动阻塞，天然流量控制，无需 `sleep` 轮询
+- **进度**：`AudioTrack.getPlaybackHeadPosition()` 返回已渲染采样数。`realPosMs = seekOffsetMs + headPosition * 1000 / sampleRate`。精度到采样级（~0.02ms @ 48kHz）
+- **多声道**：`AudioTrack` 构造时使用源文件实际 `channelCount`，Android 音频框架自动 downmix 到输出设备，行为与系统播放器一致
 
-int   mp3_load_file(Mp3Decoder* dec, const char* path);
-int   mp3_get_samples(Mp3Decoder* dec, float* out, int offset, int count);
-void  mp3_release(Mp3Decoder* dec);
+### 2.2 AudioTrack 构造
+
+```java
+int bufferSize = AudioTrack.getMinBufferSize(
+    sampleRate,                                  // 源文件采样率
+    channelCount == 1 ? AudioFormat.CHANNEL_OUT_MONO : AudioFormat.CHANNEL_OUT_STEREO,
+    AudioFormat.ENCODING_PCM_16BIT
+);
+
+audioTrack = new AudioTrack.Builder()
+    .setAudioAttributes(new AudioAttributes.Builder()
+        .setUsage(AudioAttributes.USAGE_MEDIA)
+        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+        .build())
+    .setAudioFormat(new AudioFormat.Builder()
+        .setSampleRate(sampleRate)
+        .setChannelMask(channelMask)
+        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+        .build())
+    .setBufferSizeInBytes(bufferSize * 2)
+    .setTransferMode(AudioTrack.MODE_STREAM)
+    .build();
 ```
 
-- `mp3_load_file`：调用 `mp3dec_load()` 一次性解码整个文件到内存
-- `mp3_get_samples`：从 PCM buffer 指定偏移读取指定数量采样点，转为 float [-1,1]
+> `MODE_STREAM` + `write()` 阻塞行为保证播放线程与音频硬件同步，是流式播放的基础。
 
-### 2.2 WAV 解码
+### 2.3 播放线程
 
-```c
-// wav_decoder.h
-typedef struct {
-    int16_t* pcm_buffer;
-    size_t   pcm_size;
-    int      sample_rate;
-    int      channels;
-    int      bit_depth;
-    int      is_loaded;
-} WavDecoder;
+后台 `HandlerThread("audio-playback")` 中运行解码-写入循环：
 
-int   wav_load_file(WavDecoder* dec, const char* path);
-int   wav_get_samples(WavDecoder* dec, float* out, int offset, int count);
-void  wav_release(WavDecoder* dec);
-```
+```java
+// 伪代码
+HandlerThread audioThread = new HandlerThread("audio-playback");
+Handler handler = new Handler(audioThread.getLooper());
 
-解析流程：RIFF chunk → fmt chunk（获取 sample_rate/channels/bit_depth）→ data chunk（读取 PCM）
-
-### 2.3 音频引擎 (Oboe) — 多声道 + 精确控制
-
-**PCM 数据布局**：`float pcm[total_frames * channels]`，交错存储。例如立体声 `[L0, R0, L1, R1, ...]`。
-
-**帧 vs 采样点**：帧(frame) = 同一时刻所有声道的采样点。`total_frames` 和 `current_frame` 都以帧为单位。`engine_get_position_ms()` = `current_frame * 1000 / sample_rate`。
-
-```c
-// audio_engine.h
-typedef struct {
-    // Oboe
-    oboe::AudioStream* stream;
-    oboe::AudioStreamBuilder builder;
-
-    // 解码器（二选一）
-    int is_mp3;
-    Mp3Decoder mp3;
-    WavDecoder wav;
-
-    // 播放状态
-    volatile int is_playing;       // 原子标记，Oboe 回调 + Java 线程读写
-    volatile int seek_requested;   // seek 标记
-    volatile long seek_target_ms;  // 目标位置
-    int      is_completed;
-    int      total_frames;
-    int      current_frame;        // 当前帧位置（仅 Oboe 回调线程写入）
-    int      sample_rate;
-    int      channels;
-
-    // PCM 数据（交错 float）
-    float*   pcm_float;            // total_frames * channels 个 float
-
-    // 回调函数指针（JNI 设置）
-    void (*on_position_update)(long position_ms);
-    void (*on_playback_complete)();
-} AudioEngine;
-
-int  engine_init(AudioEngine* eng);
-int  engine_load_file(AudioEngine* eng, const char* path);
-// sample_rate 和 channels 由解码器填充，调用方从 eng 读取
-void engine_play(AudioEngine* eng);
-void engine_pause(AudioEngine* eng);
-void engine_seek(AudioEngine* eng, long position_ms);  // 原子设置 seek 标记
-long engine_get_position_ms(AudioEngine* eng);
-long engine_get_duration_ms(AudioEngine* eng);
-int  engine_is_playing(AudioEngine* eng);
-void engine_release(AudioEngine* eng);
-```
-
-**Oboe 回调（完整版，支持 seek + 多声道 + 精确位置）**：
-
-```c
-oboe::DataCallbackResult onAudioReady(
-    oboe::AudioStream* stream, void* audioData, int32_t numFrames) {
-
-    AudioEngine* eng = (AudioEngine*)stream->getContext();
-    float* out = (float*)audioData;
-
-    // --- 处理 seek 请求 ---
-    if (eng->seek_requested) {
-        long target_ms = eng->seek_target_ms;
-        eng->current_frame = (int)((target_ms * eng->sample_rate) / 1000);
-        if (eng->current_frame >= eng->total_frames)
-            eng->current_frame = eng->total_frames;
-        eng->seek_requested = 0;
-        // seek 后立即通知 Java 层新位置
-        if (eng->on_position_update)
-            eng->on_position_update(eng->current_frame * 1000 / eng->sample_rate);
-    }
-
-    // --- 填充音频数据 ---
-    int remaining = eng->total_frames - eng->current_frame;
-    int to_copy = (numFrames < remaining) ? numFrames : remaining;
-
-    if (to_copy > 0) {
-        // 交错 PCM：一次性拷贝 to_copy * channels 个 float
-        memcpy(out,
-               eng->pcm_float + eng->current_frame * eng->channels,
-               to_copy * eng->channels * sizeof(float));
-        eng->current_frame += to_copy;
-
-        // 尾部填充静音
-        if (to_copy < numFrames) {
-            memset(out + to_copy * eng->channels, 0,
-                   (numFrames - to_copy) * eng->channels * sizeof(float));
+handler.post(() -> {
+    while (!isReleased && !isEOS) {
+        // 1. 从 extractor 读一帧压缩数据
+        int inputBufIdx = codec.dequeueInputBuffer(10000);
+        if (inputBufIdx >= 0) {
+            ByteBuffer ib = codec.getInputBuffer(inputBufIdx);
+            int size = extractor.readSampleData(ib, 0);
+            if (size < 0) {
+                codec.queueInputBuffer(inputBufIdx, 0, 0, 0, BUFFER_FLAG_END_OF_STREAM);
+                sawInputEOS = true;
+            } else {
+                codec.queueInputBuffer(inputBufIdx, 0, size, extractor.getSampleTime(), 0);
+                extractor.advance();
+            }
         }
-    } else {
-        memset(out, 0, numFrames * eng->channels * sizeof(float));
-        eng->is_completed = 1;
-        eng->is_playing = 0;
-        if (eng->on_playback_complete) eng->on_playback_complete();
-        return oboe::DataCallbackResult::Stop;
+
+        // 2. 取解码后的 PCM
+        int outBufIdx = codec.dequeueOutputBuffer(info, 10000);
+        if (outBufIdx >= 0) {
+            ByteBuffer ob = codec.getOutputBuffer(outBufIdx);
+            if (info.size > 0) {
+                // 3. 写入 AudioTrack（满则阻塞）
+                audioTrack.write(ob, info.size, AudioTrack.WRITE_BLOCKING);
+                bytesWritten += info.size;
+            }
+            codec.releaseOutputBuffer(outBufIdx, false);
+            if ((info.flags & BUFFER_FLAG_END_OF_STREAM) != 0) sawOutputEOS = true;
+        }
     }
+});
+```
 
-    return oboe::DataCallbackResult::Continue;
+### 2.4 seek 实现
+
+```
+seek(ms):
+  1. 设置 seek_requested 标志 → Handler 退出当前 write 阻塞
+  2. audioTrack.pause()
+  3. audioTrack.flush()        // 清空播放缓冲区
+  4. codec.flush()             // 清空解码器缓冲区
+  5. extractor.seekTo(ms * 1000, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+  6. seekOffsetMs = ms         // 因 flush 后 headPosition 归零，需要用 offset 补偿
+  7. bytesWritten = 0
+  8. audioTrack.play()
+  9. 重新 post 解码循环到 Handler
+```
+
+位置计算：
+
+```java
+public long getPositionMs() {
+    if (audioTrack == null || sampleRate <= 0) return 0;
+    long playedFrames = audioTrack.getPlaybackHeadPosition();
+    // headPosition 在 flush/stop 后归零，seekOffsetMs 补偿
+    return seekOffsetMs + (playedFrames * 1000 / sampleRate);
 }
 ```
 
-**Oboe Stream 构建参数**：
+### 2.5 pause / resume
 
-```c
-void engine_create_stream(AudioEngine* eng) {
-    oboe::AudioStreamBuilder builder;
-    builder.setDirection(oboe::Direction::Output)
-           .setPerformanceMode(oboe::PerformanceMode::LowLatency)
-           .setSharingMode(oboe::SharingMode::Exclusive)
-           .setFormat(oboe::AudioFormat::Float)
-           .setChannelCount(eng->channels)          // 使用实际声道数
-           .setSampleRate(eng->sample_rate)
-           .setDataCallback(&onAudioReady)
-           .setContext(eng);
-    builder.openStream(&eng->stream);
-}
-```
+- **pause**: `audioTrack.pause()` → 解码线程继续运行，但 `audioTrack.write()` 之后调用会被阻塞或丢弃（实际上 pause 后 write 返回 0 或等待）；更稳妥的做法是同时停止 Handler 投递
+- **resume**: `audioTrack.play()` → 重新 post 解码循环
 
-> `setChannelCount(eng->channels)` 保证立体声正确推送到耳机左右声道。
+### 2.6 声道兼容
 
-**声道兼容策略**（与常规播放软件一致）：
-
-| 音频文件 | 设备输出 | 处理方式 |
+| 音频源 | 设备输出 | AudioTrack 行为 |
 |------|------|------|
-| 单声道 | 立体声耳机 | Oboe 自动将单声道复制到左右双声道（标准行为） |
-| 立体声 | 立体声耳机 | 左→左，右→右，无处理 |
-| 多声道(5.1) | 立体声耳机 | Oboe 自动下混为立体声（标准 downmix） |
-| 任意 | 任意 | **不自行做声道变换**，全部交由 Oboe 处理，行为与系统播放器一致 |
-
-**采样率**：`engine_init()` 中不预设采样率，由解码器从文件头读取后设置。Oboe 首选设备原生采样率（`AudioStreamBuilder::openStream` 自动协商），避免 Android 系统重采样引入延迟。
-
-**播放控制接口（完整列表）**：
-
-| 方法 | 线程安全 | 说明 |
-|------|:--:|------|
-| `engine_play()` | 任意线程 | 打开 stream → requestStart |
-| `engine_pause()` | 任意线程 | requestPause + requestStop（必须等待 stopped 再返回） |
-| `engine_seek(ms)` | 任意线程 | 原子设置 seek_requested=1 + seek_target_ms，下次回调生效 |
-| `engine_get_position_ms()` | 任意线程 | `current_frame * 1000 / sample_rate` |
-| `engine_get_duration_ms()` | 任意线程 | `total_frames * 1000 / sample_rate` |
-| `engine_is_playing()` | 任意线程 | 读 volatile is_playing |
-
-**切换曲目流程**：
-
-```
-用户点下一首:
-  Java: vm.playNext()
-    → engine_pause()           // 暂停当前
-    → engine_release()         // 释放旧引擎
-    → engine = new AudioEngine()
-    → engine_load_file(nextPath)  // 加载新文件
-    → engine_play()               // 开始播放
-    → 更新 currentTrackIndex
-```
-
-> Phase 6 将优化为预加载池（提前加载下一首的 PCM 到内存），减少切换延迟。Phase 3 使用最简单的一次性加载方案。
-
-### 2.4 波形采样
-
-```c
-// waveform_sampler.c
-// 将 PCM 数据降采样为渲染用的数据点
-// 例如：44100 采样点/秒 → 每个像素 1 个数据点（peak + RMS）
-
-void waveform_sample(float* pcm, int total_frames, int channels,
-                     float* out_peaks, int out_count);
-```
-
-输出 `out_peaks[out_count * 2]`（每点两个值：min 和 max，用于波形图绘制）
+| 单声道 | 立体声耳机 | `CHANNEL_OUT_MONO` → 系统复制到左右 |
+| 立体声 | 立体声耳机 | `CHANNEL_OUT_STEREO` → 左到左，右到右 |
+| 5.1/7.1 | 立体声耳机 | 系统 downmix 为立体声 |
+| 任意 | 任意 | **不自行做声道变换**，全部交由 Android 框架处理 |
 
 ---
 
-## 3. JNI 桥接层
+## 3. Java AudioEngine 封装
 
-### 3.1 Java 声明
-
-```java
-public class AudioEngine {
-    static { System.loadLibrary("hypnovibe_audio"); }
-
-    public native long nativeInit(int sampleRate, int channels);
-    public native boolean nativeLoadFile(long ptr, String path);
-    public native void nativePlay(long ptr);
-    public native void nativePause(long ptr);
-    public native void nativeSeek(long ptr, long positionMs);
-    public native long nativeGetPosition(long ptr);
-    public native long nativeGetDuration(long ptr);
-    public native boolean nativeIsPlaying(long ptr);
-    public native void nativeRelease(long ptr);
-
-    // 回调注册
-    public native void nativeSetPositionUpdateCallback(long ptr, AudioEngine engine);
-    public native void nativeSetCompletionCallback(long ptr, AudioEngine engine);
-}
-```
-
-### 3.2 C 层 JNI 实现
-
-```c
-// jni_bridge.c
-JNIEXPORT jlong JNICALL
-Java_com_hypno_hypnovibe_infrastructure_audio_AudioEngine_nativeInit(
-    JNIEnv* env, jclass clazz, jint sampleRate, jint channels) {
-    AudioEngine* eng = (AudioEngine*)malloc(sizeof(AudioEngine));
-    engine_init(eng, sampleRate, channels);
-    return (jlong)eng;
-}
-// ... 其他 JNI 函数类似
-```
-
----
-
-## 4. Java 封装层
-
-### 4.1 AudioEngine.java
+### 3.1 AudioEngine.java API
 
 ```java
 public class AudioEngine {
-    private long nativePtr;
-    private AudioPlayerCallback callback;
-
-    public interface AudioPlayerCallback {
-        void onPositionUpdate(long positionMs);
-        void onPlaybackComplete();
-    }
-
-    public void setCallback(AudioPlayerCallback cb) { this.callback = cb; }
-
-    public boolean loadFile(String path) {
-        if (nativePtr == 0) return false;
-        String realPath = resolveContentUri(path);
-        return nativeLoadFile(nativePtr, realPath);
-    }
-
-    public void play() { nativePlay(nativePtr); }
-    public void pause() { nativePause(nativePtr); }
-    public void seek(long ms) { nativeSeek(nativePtr, ms); }
-    public long getPosition() { return nativeGetPosition(nativePtr); }
-    public long getDuration() { return nativeGetDuration(nativePtr); }
-    public boolean isPlaying() { return nativeIsPlaying(nativePtr); }
-
-    public void release() {
-        if (nativePtr != 0) { nativeRelease(nativePtr); nativePtr = 0; }
-    }
-
-    // 从 Java 线程回调 C 层触发的位置更新
-    private void onNativePositionUpdate(long ms) {
-        if (callback != null) callback.onPositionUpdate(ms);
-    }
-    private void onNativePlaybackComplete() {
-        if (callback != null) callback.onPlaybackComplete();
-    }
+    // 播放控制
+    public void play();
+    public void pause();
+    public void seek(long ms);
+    public void release();
+    
+    // 状态查询
+    public long getPositionMs();
+    public long getDurationMs();
+    public boolean isPlaying();
+    
+    // 加载文件（自动获取音频格式信息并构造 AudioTrack）
+    public boolean loadFile(Context ctx, String path);
 }
 ```
 
-### 4.2 PlaySessionVM 扩展
+### 3.2 内部结构
 
 ```java
-private AudioEngine audioEngine;
-private int currentTrackIndex = -1;
-private ScheduledExecutorService positionPoller;  // Phase 3 位置轮询
+public class AudioEngine {
+    private MediaExtractor extractor;
+    private MediaCodec codec;
+    private AudioTrack audioTrack;
+    private HandlerThread audioThread;
+    private Handler audioHandler;
+    
+    private int sampleRate;
+    private int channelCount;
+    private long durationMs;
+    private long seekOffsetMs;       // seek 后补偿 headPosition 归零
+    private volatile boolean isPlaying;
+    private volatile boolean isReleased;
+}
+```
 
-private final MutableStateFlow<Long> positionMs = new MutableStateFlow<>(0L);
-private final MutableStateFlow<Long> durationMs = new MutableStateFlow<>(0L);
-private final MutableStateFlow<Boolean> isPlaying = new MutableStateFlow<>(false);
+### 3.3 PlaySessionVM 使用流程
 
-public StateFlow<Long> getPositionMs() { return positionMs; }
-public StateFlow<Long> getDurationMs() { return durationMs; }
-public StateFlow<Boolean> getIsPlaying() { return isPlaying; }
-
-public void initAudioEngine() {
-    audioEngine = new AudioEngine();
-    audioEngine.nativeInit(0, 0);
-    audioEngine.setCallback(new AudioEngine.AudioPlayerCallback() {
-        @Override public void onPositionUpdate(long ms) { positionMs.setValue(ms); }
-        @Override public void onPlaybackComplete() {
-            isPlaying.setValue(false);
-            if (playMode().equals("LOOP_LIST") || playMode().equals("LOOP_LAST"))
-                playNext();
-        }
-    });
-    // 每 ~33ms 轮询位置，供 UI 进度条 + 时间轴引擎同步
-    positionPoller = Executors.newSingleThreadScheduledExecutor();
+```java
+// 播放曲目（后台线程）
+ioExecutor.execute(() -> {
+    AudioEngine engine = new AudioEngine();
+    if (!engine.loadFile(ctx, audioPath)) { /* 错误 */ return; }
+    engine.play();
+    currentTrackIndex = index;
+    durationMs = engine.getDurationMs();
+    
+    // 启动 50ms 位置轮询
     positionPoller.scheduleAtFixedRate(() -> {
-        positionMs.setValue(audioEngine.getPosition());
-    }, 0, 33, TimeUnit.MILLISECONDS);
+        positionMs.setValue(engine.getPositionMs());
+        if (engine.getDurationMs() > 0 
+            && engine.getPositionMs() >= engine.getDurationMs() 
+            && !completedFired) {
+            completedFired = true;
+            playNext();
+        }
+    }, 0, 50, TimeUnit.MILLISECONDS);
+});
+
+// toggle 播放/暂停
+if (audioEngine.isPlaying()) {
+    audioEngine.pause();
+} else {
+    audioEngine.play();
 }
 
-public void playTrack(int index) { /* 释放旧引擎 → 加载新文件 → 播放 */ }
-public void togglePlayPause() { /* 切换播放/暂停 */ }
-public void seek(long ms) { /* seek + Phase 6 通知 Coordinator.flush() */ }
-public void playNext() { /* 根据 playMode 计算下一首索引 */ }
-public void playPrevious() { /* 上一首或归零 */ }
+// seek
+audioEngine.seek(targetMs);
+positionMs.setValue(targetMs);
 
----
+## 4. UI 集成
 
-## 5. UI 集成
-
-### 5.1 PlaylistDetailScreen 的 PlayerBar
+### 4.1 PlaylistDetailScreen 的 PlayerBar
 
 PlayerBar 从纯装饰变为功能版本：
 
@@ -397,7 +245,7 @@ PlayerBar 从纯装饰变为功能版本：
 - 进度条：`vm.getPositionMs()` → 进度条显示 + 可拖动
 - 上/下一首：`vm.playNext()` / `vm.playPrevious()`
 
-### 5.2 进度条实现
+### 4.2 进度条实现
 
 ```kotlin
 // PlayerBar 内
@@ -418,68 +266,54 @@ Slider(  // 叠加在进度条上，透明 thumb
 
 ---
 
-## 6. 构建配置
+## 5. 构建配置
 
-### 6.1 CMakeLists.txt
+音频引擎使用纯 Java `android.media` API（AudioTrack、MediaCodec、MediaExtractor），均属于 Android SDK 内置，**无需任何额外依赖或 native 编译**。
 
-```cmake
-cmake_minimum_required(VERSION 3.22.1)
-project("hypnovibe_audio")
+### 5.1 需要移除的依赖
 
-# minimp3 (header-only)
-include_directories(${CMAKE_SOURCE_DIR}/src/main/cpp/minimp3)
+| 依赖 | 说明 |
+|------|------|
+| `com.google.oboe:oboe` | Oboe AAR，不再需要 |
+| `externalNativeBuild.cmake` | NDK/CMake 编译配置，不再需要 |
+| `prefab = true` | Prefab 用于暴露 native 库，不再需要 |
+| `cpp/CMakeLists.txt` | Native 编译脚本，删除 |
+| `cpp/minimp3/` | MP3 解码头文件，删除 |
+| `cpp/*.c / cpp/*.h` | 所有 Native 源文件，删除 |
 
-add_library(hypnovibe_audio SHARED
-    audio_engine.c
-    mp3_decoder.c
-    wav_decoder.c
-    waveform_sampler.c
-    jni_bridge.c
-)
+### 5.2 保留/新增的依赖
 
-# Oboe
-find_library(oboe oboe)
-target_link_libraries(hypnovibe_audio ${oboe} log)
-```
-
-### 6.2 minimp3 下载
-
-手动从 https://raw.githubusercontent.com/lieff/minimp3/master/minimp3.h 下载，放入 `app/src/main/cpp/minimp3/minimp3.h`
+无。`MediaCodec`、`MediaExtractor`、`AudioTrack` 均为 `android.media` 包内置 API，无需额外 Gradle 依赖。
 
 ---
 
-## 7. 文件清单
+## 6. 文件清单
 
 ### 新增/修改
 
 ```
-app/src/main/cpp/
-├── CMakeLists.txt          (重写，添加实际源文件)
-├── minimp3/
-│   └── minimp3.h           (下载)
-├── audio_engine.h
-├── audio_engine.c
-├── mp3_decoder.h
-├── mp3_decoder.c
-├── wav_decoder.h
-├── wav_decoder.c
-├── waveform_sampler.h
-├── waveform_sampler.c
-└── jni_bridge.c
-
 app/src/main/java/.../
 ├── infrastructure/audio/
-│   └── AudioEngine.java   (新增或重写)
+│   └── AudioEngine.java   (重写：纯 Java，移除所有 native 方法)
 └── app/viewmodel/
-    └── PlaySessionVM.java  (扩展，添加播放控制)
-
-app/src/main/kotlin/.../ui/screen/playlist/
-└── PlaylistDetailScreen.kt (PlayerBar 接入真实播放)
+    └── PlaySessionVM.java  (适配新 API)
 ```
+
+### 删除
+
+```
+app/src/main/cpp/               (整个目录删除)
+├── CMakeLists.txt
+├── minimp3/minimp3.h
+├── audio_engine.h / audio_engine.c
+├── mp3_decoder.h / mp3_decoder.c
+├── wav_decoder.h / wav_decoder.c
+├── waveform_sampler.h / waveform_sampler.c
+└── jni_bridge.c
 
 ---
 
-## 8. 验证标准
+## 7. 验证标准
 
 | # | 检查项 |
 |:--:|------|

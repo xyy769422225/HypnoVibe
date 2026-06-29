@@ -27,13 +27,6 @@ android {
         versionName = "0.1.0-phase1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-
-        externalNativeBuild {
-            cmake {
-                // Oboe 需要 shared STL
-                arguments += "-DANDROID_STL=c++_shared"
-            }
-        }
     }
 
     signingConfigs {
@@ -61,14 +54,6 @@ android {
     }
     buildFeatures {
         compose = true
-        prefab = true
-    }
-
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
-        }
     }
 }
 
@@ -84,7 +69,6 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.gson)
-    implementation(libs.oboe)
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

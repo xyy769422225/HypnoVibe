@@ -75,11 +75,8 @@ app/src/main/
 │           ├── DungeonButton.kt
 │           ├── DungeonSlider.kt
 │           ├── RunicProgressBar.kt
-│           ├── StoneCard.kt
-│           └── GothicDivider.kt
-│
-├── cpp/                               # Native C（Phase 1 仅空壳 CMake）
-│   └── CMakeLists.txt
+│       │   ├── StoneCard.kt
+│       │   └── GothicDivider.kt
 │
 ├── proto/                             # Protobuf（Phase 1 仅占位目录）
 │   └── .gitkeep
@@ -121,13 +118,6 @@ android {
     }
 
     buildFeatures { compose = true }
-
-    // 预留 Native 编译（Phase 3 启用）
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-        }
-    }
 }
 
 dependencies {
@@ -201,20 +191,6 @@ dependencies {
             android:foregroundServiceType="mediaPlayback" /> -->
     </application>
 </manifest>
-```
-
-### 1.4 CMakeLists.txt（空壳）
-
-```cmake
-cmake_minimum_required(VERSION 3.22.1)
-project("hypnovibe_audio")
-
-# Phase 3 添加：audio_engine.c, mp3_decoder.c, wav_decoder.c, jni_bridge.c
-# Phase 6 添加：timeline_index.c
-
-add_library(hypnovibe_audio SHARED
-    # 暂无源文件
-)
 ```
 
 ---

@@ -115,37 +115,27 @@ public class PlaySessionVM extends AndroidViewModel {
                 isPlaying.setValue(false);
 
                 // 2. 创建新引擎
-                audioEngine = AudioEngine.create();
+                audioEngine = new AudioEngine();
 
-                // 3. 解码音频文件（最耗时的操作，在后台线程）
-                AudioEngine.DecodedAudio decoded = AudioEngine.decode(getApplication(), audioPath);
-                if (decoded == null) {
-                    Log.e(TAG, "decode failed: " + audioPath);
-                    audioEngine = null;
-                    isLoading.setValue(false);
-                    errorMsg.setValue("无法解码音频文件，请删除后重新添加");
-                    return;
-                }
-
-                // 4. 加载到 native
-                if (!audioEngine.loadDecoded(decoded)) {
-                    Log.e(TAG, "loadDecoded failed");
+                // 3. 加载音频文件（流式解码，一步到位）
+                if (!audioEngine.loadFile(getApplication(), audioPath)) {
+                    Log.e(TAG, "loadFile failed: " + audioPath);
                     audioEngine.release();
                     audioEngine = null;
                     isLoading.setValue(false);
-                    errorMsg.setValue("加载失败");
+                    errorMsg.setValue("无法加载音频文件，请删除后重新添加");
                     return;
                 }
 
-                // 5. 开始播放
+                // 4. 开始播放
                 currentTrackIndex = trackIndex;
-                durationMs.setValue(decoded.durationMs);
+                durationMs.setValue(audioEngine.getDurationMs());
                 audioEngine.play();
                 isPlaying.setValue(true);
                 isLoading.setValue(false);
                 completedFired = false;
                 startPositionPoller();
-                Log.d(TAG, "playing: duration=" + decoded.durationMs + "ms");
+                Log.d(TAG, "playing: duration=" + audioEngine.getDurationMs() + "ms");
             } catch (Throwable t) {
                 Log.e(TAG, "playTrack crashed", t);
                 if (audioEngine != null) {
@@ -209,8 +199,8 @@ public class PlaySessionVM extends AndroidViewModel {
         positionPoller.scheduleAtFixedRate(() -> {
             AudioEngine eng = audioEngine;
             if (eng == null) return;
-            long pos = eng.getPosition();
-            long dur = eng.getDuration();
+            long pos = eng.getPositionMs();
+            long dur = eng.getDurationMs();
             positionMs.setValue(pos);
 
             if (!eng.isPlaying() && dur > 0 && pos >= dur && !completedFired) {

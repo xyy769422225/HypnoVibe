@@ -32,6 +32,17 @@ public class PlaySessionVM extends AndroidViewModel {
     private ScheduledExecutorService positionPoller;
     private volatile boolean completedFired = false;
 
+    /**
+     * 位置更新监听器，供后续 PlaybackCoordinator 接入驱动设备链路。
+     * positionPoller 每 ~33ms 调用一次，传入当前音频播放位置。
+     * 后续 Phase 5/6 实现 Coordinator 后注入即可，无需改动 positionPoller。
+     */
+    public interface PositionListener {
+        void onPositionUpdate(long positionMs);
+    }
+    private volatile PositionListener positionListener;
+    public void setPositionListener(PositionListener l) { this.positionListener = l; }
+
     private final MutableStateFlow<Long> positionMs = StateFlowKt.MutableStateFlow(0L);
     private final MutableStateFlow<Long> durationMs = StateFlowKt.MutableStateFlow(0L);
     private final MutableStateFlow<Boolean> isPlaying = StateFlowKt.MutableStateFlow(false);
@@ -114,20 +125,17 @@ public class PlaySessionVM extends AndroidViewModel {
                 durationMs.setValue(0L);
                 isPlaying.setValue(false);
 
-                // 2. 创建新引擎
+                // 2. 创建新引擎并加载文件（loadFile 内自动获取格式信息）
                 audioEngine = new AudioEngine();
-
-                // 3. 加载音频文件（流式解码，一步到位）
                 if (!audioEngine.loadFile(getApplication(), audioPath)) {
                     Log.e(TAG, "loadFile failed: " + audioPath);
-                    audioEngine.release();
                     audioEngine = null;
                     isLoading.setValue(false);
                     errorMsg.setValue("无法加载音频文件，请删除后重新添加");
                     return;
                 }
 
-                // 4. 开始播放
+                // 3. 开始播放
                 currentTrackIndex = trackIndex;
                 durationMs.setValue(audioEngine.getDurationMs());
                 audioEngine.play();
@@ -196,12 +204,20 @@ public class PlaySessionVM extends AndroidViewModel {
         if (positionPoller != null) return;
         completedFired = false;
         positionPoller = Executors.newSingleThreadScheduledExecutor();
+        // 全局节拍器：33ms（~30Hz）轮询音频位置
+        // 职责1: 更新 UI 进度条（positionMs StateFlow）
+        // 职责2: 驱动设备链路（PositionListener → 后续 TimelineEngine → Coordinator → Adapter）
         positionPoller.scheduleAtFixedRate(() -> {
             AudioEngine eng = audioEngine;
             if (eng == null) return;
             long pos = eng.getPositionMs();
             long dur = eng.getDurationMs();
             positionMs.setValue(pos);
+
+            // 驱动设备链路（拉取模型：Coordinator 推送快照，Adapter 内部 100ms 自取）
+            if (positionListener != null) {
+                positionListener.onPositionUpdate(pos);
+            }
 
             if (!eng.isPlaying() && dur > 0 && pos >= dur && !completedFired) {
                 completedFired = true;
@@ -211,7 +227,7 @@ public class PlaySessionVM extends AndroidViewModel {
                     playNext();
                 }
             }
-        }, 0, 50, TimeUnit.MILLISECONDS);
+        }, 0, 33, TimeUnit.MILLISECONDS);
     }
 
     private void stopPositionPoller() {

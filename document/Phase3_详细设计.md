@@ -212,16 +212,25 @@ ioExecutor.execute(() -> {
     currentTrackIndex = index;
     durationMs = engine.getDurationMs();
     
-    // 启动 50ms 位置轮询
+    // 启动 33ms（~30Hz）全局节拍器
     positionPoller.scheduleAtFixedRate(() -> {
-        positionMs.setValue(engine.getPositionMs());
+        long pos = engine.getPositionMs();
+        positionMs.setValue(pos);                  // 职责1: 刷新 UI 进度条
+        
+        // 职责2: 驱动设备链路（PositionListener）
+        // 后续 Phase 5/6 实现 Coordinator 后注入:
+        //   vm.setPositionListener(posMs -> coordinator.onTimelineTick(posMs, timelineEngine.query(posMs)));
+        if (positionListener != null) {
+            positionListener.onPositionUpdate(pos);
+        }
+        
         if (engine.getDurationMs() > 0 
             && engine.getPositionMs() >= engine.getDurationMs() 
             && !completedFired) {
             completedFired = true;
             playNext();
         }
-    }, 0, 50, TimeUnit.MILLISECONDS);
+    }, 0, 33, TimeUnit.MILLISECONDS);
 });
 
 // toggle 播放/暂停
@@ -234,6 +243,40 @@ if (audioEngine.isPlaying()) {
 // seek
 audioEngine.seek(targetMs);
 positionMs.setValue(targetMs);
+```
+
+### 3.4 全局节拍器与设备驱动链路
+
+`positionPoller` 是整个播放系统的**全局节拍器**，承担两项职责：
+
+| 职责 | 频率 | 消费者 |
+|------|------|--------|
+| 刷新 UI 进度条 | 33ms（30Hz） | `positionMs` StateFlow → Compose |
+| 驱动设备链路 | 33ms（30Hz） | `PositionListener` → TimelineEngine → Coordinator |
+
+```
+positionPoller (33ms)
+    │
+    ├──► positionMs.setValue(pos)          → UI 进度条
+    │
+    └──► positionListener.onPositionUpdate(pos)
+                │ (Phase 5/6 接入)
+                ▼
+         TimelineEngine.query(posMs)        → 查询当前活跃段
+                │
+                ▼
+         PlaybackCoordinator.onTimelineTick() → 按设备类型分组推送快照
+                │
+                ▼
+         Adapter.updateSnapshot()           → Adapter 内部 100ms 定时器自取（拉取模型）
+                │
+                ▼
+         BLE 输出 B0 指令
+```
+
+**接入方式**：通过 `vm.setPositionListener()` 注入，无需修改 positionPoller 本身。
+
+> **拉取模型**：Coordinator 每 33ms 推送快照到 Adapter 内存，Adapter 内部 100ms 定时器自取最新值发送 B0。这种设计保证单设备断连不影响音频和其他设备，且 BLE 写入节奏由设备自身控制。
 
 ## 4. UI 集成
 

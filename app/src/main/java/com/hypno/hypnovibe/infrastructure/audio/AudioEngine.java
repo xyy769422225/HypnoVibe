@@ -8,19 +8,14 @@ import android.media.MediaCodec;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
 import android.net.Uri;
+import android.os.Handler;
+import android.os.HandlerThread;
 import android.util.Log;
-
 import java.nio.ByteBuffer;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * 纯 Java 音频引擎：MediaExtractor + MediaCodec 流式解码 → AudioTrack 播放。
- *
- * 设计要点：
- *  - 流式解码：内存占用 KB 级，不需要全量加载 PCM
- *  - 进度精确：AudioTrack.getPlaybackHeadPosition() 采样级精度，配合 seekOffset 计算毫秒位置
- *  - seek 受控：extractor.seekTo + flush codec/audioTrack，精确跳转
- *  - 多声道：AudioTrack 使用源文件实际声道配置，系统框架自动 downmix 到输出设备
+ * 纯 Java 音频引擎：MediaExtractor → MediaCodec(流式解码) → AudioTrack(流式播放)。
+ * 零 native 依赖，进度精确到采样级，多声道由系统自动 downmix。
  */
 public class AudioEngine {
     private static final String TAG = "AudioEngine";
@@ -28,62 +23,46 @@ public class AudioEngine {
     private MediaExtractor extractor;
     private MediaCodec codec;
     private AudioTrack audioTrack;
-    private Thread decodeThread;
+    private HandlerThread audioThread;
+    private Handler audioHandler;
 
     private int sampleRate;
     private int channelCount;
     private long durationMs;
-    /** seek/flush 后补偿 headPosition 归零 */
-    private volatile long seekOffsetMs;
+    private long durationUs;             // MediaExtractor 使用微秒
+    private volatile long seekOffsetMs;  // seek 后补偿 headPosition 归零
+    private volatile boolean isPlaying;
+    private volatile boolean isReleased;
+    private volatile boolean isSeeking;
+    private volatile boolean sawOutputEOS;
 
-    /** 播放状态标志，控制解码线程是否向 AudioTrack 喂数据 */
-    private final AtomicBoolean isPlaying = new AtomicBoolean(false);
-    private final AtomicBoolean isReleased = new AtomicBoolean(false);
-    /** 解码线程是否应该继续运行 */
-    private final AtomicBoolean decodeRunning = new AtomicBoolean(false);
-    /** seek 请求标志，解码线程检测后执行 */
-    private final AtomicBoolean seekRequested = new AtomicBoolean(false);
-    private volatile long seekTargetMs = 0;
+    // ── 公开 API ──
 
-    /** 暂停时阻塞解码线程 */
-    private final Object pauseLock = new Object();
-    /** 保护 extractor/codec（解码线程 + 主线程 seek 都会访问） */
-    private final Object codecLock = new Object();
-
-    /** 播放完成监听 */
-    public interface CompletionListener {
-        void onPlaybackComplete();
-    }
-    private volatile CompletionListener completionListener;
-    private volatile boolean completedFired = false;
-
+    /** 创建引擎实例 */
     public AudioEngine() {}
 
-    public void setCompletionListener(CompletionListener l) {
-        this.completionListener = l;
-    }
-
-    // ── 加载文件 ──────────────────────────────────────────
-
     /**
-     * 加载音频文件，自动探测格式并构造解码器与 AudioTrack。
-     * 支持本地文件路径和 content:// URI。
-     * @return 成功返回 true
+     * 加载音频文件，自动获取格式信息并构造 AudioTrack。
+     * 应在后台线程调用。
      */
     public boolean loadFile(Context ctx, String path) {
-        if (isReleased.get()) return false;
-        if (path == null || path.isEmpty()) return false;
+        releaseInternal();
 
+        extractor = new MediaExtractor();
         try {
-            extractor = new MediaExtractor();
             if (path.startsWith("content://")) {
-                extractor.setDataSource(ctx, Uri.parse(path), null);
+                android.os.ParcelFileDescriptor pfd =
+                    ctx.getContentResolver().openFileDescriptor(Uri.parse(path), "r");
+                if (pfd == null) throw new RuntimeException("openFileDescriptor returned null");
+                extractor.setDataSource(pfd.getFileDescriptor(), 0, pfd.getStatSize());
+                pfd.close();
             } else {
                 extractor.setDataSource(path);
             }
         } catch (Exception e) {
             Log.e(TAG, "setDataSource failed: " + path, e);
-            releaseInternal();
+            try { extractor.release(); } catch (Exception ignored) {}
+            extractor = null;
             return false;
         }
 
@@ -98,322 +77,255 @@ public class AudioEngine {
                 break;
             }
         }
-        if (audioTrackIdx < 0 || format == null) {
+        if (audioTrackIdx < 0) {
             Log.e(TAG, "no audio track in " + path);
-            releaseInternal();
+            try { extractor.release(); } catch (Exception ignored) {}
+            extractor = null;
+            return false;
+        }
+
+        sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE);
+        channelCount = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
+        durationUs = format.containsKey(MediaFormat.KEY_DURATION)
+            ? format.getLong(MediaFormat.KEY_DURATION) : 0;
+        durationMs = durationUs / 1000;
+
+        String mime = format.getString(MediaFormat.KEY_MIME);
+        try {
+            codec = MediaCodec.createDecoderByType(mime);
+        } catch (Exception e) {
+            Log.e(TAG, "createDecoderByType failed", e);
+            try { extractor.release(); } catch (Exception ignored) {}
+            extractor = null;
             return false;
         }
 
         extractor.selectTrack(audioTrackIdx);
-        sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE);
-        channelCount = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
-        if (format.containsKey(MediaFormat.KEY_DURATION)) {
-            durationMs = format.getLong(MediaFormat.KEY_DURATION) / 1000;
-        }
-
-        // 创建解码器
-        String mime = format.getString(MediaFormat.KEY_MIME);
         try {
-            codec = MediaCodec.createDecoderByType(mime);
             codec.configure(format, null, null, 0);
             codec.start();
         } catch (Exception e) {
-            Log.e(TAG, "codec init failed", e);
+            Log.e(TAG, "codec configure/start failed", e);
             releaseInternal();
             return false;
         }
 
-        // 创建 AudioTrack，使用源声道配置让系统正确 downmix
-        if (!createAudioTrack()) {
-            releaseInternal();
-            return false;
-        }
-
-        seekOffsetMs = 0;
-        completedFired = false;
-        Log.d(TAG, "loaded: " + channelCount + "ch, " + sampleRate + "Hz, " + durationMs + "ms");
-        return true;
-    }
-
-    /** 根据源声道数构造 AudioTrack，不支持时降级到立体声 */
-    private boolean createAudioTrack() {
-        int channelMask = channelCountToOutMask(channelCount);
-        int minBuf = AudioTrack.getMinBufferSize(sampleRate, channelMask,
-                AudioFormat.ENCODING_PCM_16BIT);
-        if (minBuf <= 0) {
-            Log.e(TAG, "getMinBufferSize failed for mask=" + channelMask);
-            return false;
-        }
-
+        // 构造 AudioTrack
+        int channelMask = channelCount == 1
+            ? AudioFormat.CHANNEL_OUT_MONO
+            : AudioFormat.CHANNEL_OUT_STEREO;
+        int minBuf = AudioTrack.getMinBufferSize(
+            sampleRate, channelMask, AudioFormat.ENCODING_PCM_16BIT);
         try {
             audioTrack = new AudioTrack.Builder()
-                    .setAudioAttributes(new AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_MEDIA)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                            .build())
-                    .setAudioFormat(new AudioFormat.Builder()
-                            .setSampleRate(sampleRate)
-                            .setChannelMask(channelMask)
-                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                            .build())
-                    .setBufferSizeInBytes(minBuf * 2)
-                    .setTransferMode(AudioTrack.MODE_STREAM)
-                    .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_NONE)
-                    .build();
+                .setAudioAttributes(new AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build())
+                .setAudioFormat(new AudioFormat.Builder()
+                    .setSampleRate(sampleRate)
+                    .setChannelMask(channelMask)
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .build())
+                .setBufferSizeInBytes(Math.max(minBuf * 2, 4096))
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build();
         } catch (Exception e) {
-            Log.w(TAG, "AudioTrack build with mask=" + channelMask + " failed, fallback to STEREO", e);
-            // 降级：源是多声道但设备不支持时，强制立体声（系统重采样）
-            try {
-                channelMask = AudioFormat.CHANNEL_OUT_STEREO;
-                minBuf = AudioTrack.getMinBufferSize(sampleRate, channelMask,
-                        AudioFormat.ENCODING_PCM_16BIT);
-                audioTrack = new AudioTrack.Builder()
-                        .setAudioAttributes(new AudioAttributes.Builder()
-                                .setUsage(AudioAttributes.USAGE_MEDIA)
-                                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                                .build())
-                        .setAudioFormat(new AudioFormat.Builder()
-                                .setSampleRate(sampleRate)
-                                .setChannelMask(channelMask)
-                                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                                .build())
-                        .setBufferSizeInBytes(minBuf * 2)
-                        .setTransferMode(AudioTrack.MODE_STREAM)
-                        .build();
-            } catch (Exception e2) {
-                Log.e(TAG, "AudioTrack fallback failed", e2);
-                return false;
-            }
+            Log.e(TAG, "AudioTrack build failed", e);
+            releaseInternal();
+            return false;
         }
+
+        // 后台播放线程
+        audioThread = new HandlerThread("audio-playback", android.os.Process.THREAD_PRIORITY_AUDIO);
+        audioThread.start();
+        audioHandler = new Handler(audioThread.getLooper());
+
+        seekOffsetMs = 0;
+        isReleased = false;
+        isSeeking = false;
+        sawOutputEOS = false;
+        Log.d(TAG, "loaded: " + sampleRate + "Hz " + channelCount + "ch " + durationMs + "ms");
         return true;
     }
 
-    private static int channelCountToOutMask(int count) {
-        switch (count) {
-            case 1: return AudioFormat.CHANNEL_OUT_MONO;
-            case 2: return AudioFormat.CHANNEL_OUT_STEREO;
-            case 4: return AudioFormat.CHANNEL_OUT_QUAD;
-            case 6: return AudioFormat.CHANNEL_OUT_5POINT1;
-            case 8: return AudioFormat.CHANNEL_OUT_7POINT1_SURROUND;
-            default: return AudioFormat.CHANNEL_OUT_STEREO;
-        }
-    }
-
-    // ── 播放控制 ──────────────────────────────────────────
-
-    /** 开始播放（首次或从暂停恢复） */
+    /** 开始播放 */
     public void play() {
-        if (isReleased.get() || audioTrack == null) return;
-        completedFired = false;
-        isPlaying.set(true);
-        audioTrack.play();
-        // 启动或重启解码线程
-        if (decodeThread == null || !decodeThread.isAlive()) {
-            startDecodeLoop();
+        if (isReleased || audioTrack == null) return;
+        if (isPlaying) return;
+
+        try { audioTrack.play(); } catch (Exception e) {
+            Log.e(TAG, "audioTrack.play failed", e);
+            return;
         }
-        // 唤醒可能被 pause 阻塞的解码线程
-        synchronized (pauseLock) { pauseLock.notifyAll(); }
+        isPlaying = true;
+        sawOutputEOS = false;
+        postDecodeLoop();
     }
 
-    /** 暂停播放 */
+    /** 暂停 */
     public void pause() {
-        if (isReleased.get() || audioTrack == null) return;
-        isPlaying.set(false);
+        if (!isPlaying || audioTrack == null) return;
+        isPlaying = false;
         try { audioTrack.pause(); } catch (Exception ignored) {}
+        // 清空 Handler 队列中待执行的 decode 任务
+        if (audioHandler != null) audioHandler.removeCallbacksAndMessages(null);
     }
 
     /**
-     * 精确跳转到指定毫秒位置。
-     * 实际 seek 操作在解码线程内执行（避免与解码并发访问 codec）。
+     * 跳转到指定位置（毫秒）。
+     * 原理：暂停 → flush 所有缓冲区 → extractor.seekTo → 重置 offset → 恢复
      */
     public void seek(long ms) {
-        if (isReleased.get() || extractor == null) return;
+        if (isReleased || audioTrack == null || extractor == null || codec == null) return;
         if (ms < 0) ms = 0;
         if (durationMs > 0 && ms > durationMs) ms = durationMs;
-        completedFired = false;
-        seekTargetMs = ms;
-        seekRequested.set(true);
-        // 唤醒可能被 pause 阻塞的解码线程以处理 seek
-        synchronized (pauseLock) { pauseLock.notifyAll(); }
-        // 若解码线程已退出（播放结束），重启它执行 seek
-        if (decodeThread == null || !decodeThread.isAlive()) {
-            startDecodeLoop();
+
+        isSeeking = true;
+        isPlaying = false;
+        if (audioHandler != null) audioHandler.removeCallbacksAndMessages(null);
+
+        try { audioTrack.pause(); } catch (Exception ignored) {}
+        try { audioTrack.flush(); } catch (Exception ignored) {}
+        try { codec.flush(); } catch (Exception ignored) {}
+
+        try {
+            extractor.seekTo(ms * 1000, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
+        } catch (Exception e) {
+            Log.e(TAG, "seekTo failed", e);
         }
+
+        seekOffsetMs = ms;
+        sawOutputEOS = false;
+        isSeeking = false;
+        try { audioTrack.play(); } catch (Exception ignored) {}
+        isPlaying = true;
+        postDecodeLoop();
     }
 
-    // ── 状态查询 ──────────────────────────────────────────
-
-    /** 当前播放位置（毫秒），采样级精度 */
+    /** 当前位置（毫秒），采样级精度 */
     public long getPositionMs() {
-        if (audioTrack == null || sampleRate <= 0) return seekOffsetMs;
+        if (audioTrack == null || sampleRate <= 0) return 0;
         long headPos = audioTrack.getPlaybackHeadPosition();
+        // headPosition 在 flush/stop 后归零，seekOffsetMs 补偿
         return seekOffsetMs + (headPos * 1000 / sampleRate);
     }
 
+    /** 总时长（毫秒） */
     public long getDurationMs() {
         return durationMs;
     }
 
+    /** 是否正在播放 */
     public boolean isPlaying() {
-        return isPlaying.get() && !isReleased.get();
+        return isPlaying && !isReleased;
     }
 
-    // ── 解码线程 ──────────────────────────────────────────
-
-    private void startDecodeLoop() {
-        decodeRunning.set(true);
-        decodeThread = new Thread(this::decodeLoop, "audio-decode");
-        decodeThread.setPriority(Thread.MAX_PRIORITY);
-        decodeThread.start();
-    }
-
-    private void decodeLoop() {
-        MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
-        boolean sawInputEOS = false;
-        boolean sawOutputEOS = false;
-
-        while (decodeRunning.get() && !isReleased.get()) {
-            // 处理 seek 请求（在解码线程内同步操作 codec/extractor）
-            if (seekRequested.compareAndSet(true, false)) {
-                sawInputEOS = false;
-                sawOutputEOS = false;
-                doSeekInternal();
-                continue;
-            }
-
-            // 暂停时阻塞，避免空转消耗 CPU
-            if (!isPlaying.get()) {
-                try {
-                    synchronized (pauseLock) {
-                        while (!isPlaying.get() && decodeRunning.get()
-                                && !seekRequested.get() && !isReleased.get()) {
-                            pauseLock.wait(200);
-                        }
-                    }
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                }
-                continue;
-            }
-
-            synchronized (codecLock) {
-                if (!decodeRunning.get() || isReleased.get()) break;
-
-                try {
-                    // 喂入压缩数据
-                    if (!sawInputEOS && codec != null) {
-                        int inputIdx = codec.dequeueInputBuffer(10000);
-                        if (inputIdx >= 0) {
-                            ByteBuffer ib = codec.getInputBuffer(inputIdx);
-                            int size = (ib != null) ? extractor.readSampleData(ib, 0) : -1;
-                            if (size < 0) {
-                                codec.queueInputBuffer(inputIdx, 0, 0, 0,
-                                        MediaCodec.BUFFER_FLAG_END_OF_STREAM);
-                                sawInputEOS = true;
-                            } else {
-                                codec.queueInputBuffer(inputIdx, 0, size,
-                                        extractor.getSampleTime(), 0);
-                                extractor.advance();
-                            }
-                        }
-                    }
-
-                    // 取出解码 PCM 并写入 AudioTrack
-                    if (codec != null && audioTrack != null) {
-                        int outIdx = codec.dequeueOutputBuffer(info, 10000);
-                        if (outIdx >= 0) {
-                            ByteBuffer ob = codec.getOutputBuffer(outIdx);
-                            if (info.size > 0 && ob != null) {
-                                // 阻塞写入：缓冲区满时自动等待，天然流控
-                                audioTrack.write(ob, info.size, AudioTrack.WRITE_BLOCKING);
-                            }
-                            codec.releaseOutputBuffer(outIdx, false);
-                            if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-                                sawOutputEOS = true;
-                            }
-                        }
-                    }
-                } catch (Exception e) {
-                    Log.e(TAG, "decode loop error", e);
-                    break;
-                }
-            }
-        }
-
-        // 播放结束回调
-        if (sawOutputEOS && !seekRequested.get() && !isReleased.get()) {
-            completedFired = true;
-            isPlaying.set(false);
-            if (completionListener != null) {
-                completionListener.onPlaybackComplete();
-            }
-        }
-    }
-
-    /** 在解码线程内执行 seek：flush 所有组件并跳转 extractor */
-    private void doSeekInternal() {
-        synchronized (codecLock) {
-            if (audioTrack != null) {
-                try {
-                    audioTrack.pause();
-                    audioTrack.flush();
-                } catch (Exception ignored) {}
-            }
-            if (codec != null) {
-                try {
-                    codec.flush();
-                    codec.start();
-                } catch (Exception ignored) {}
-            }
-            try {
-                extractor.seekTo(seekTargetMs * 1000, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
-            } catch (Exception ignored) {}
-            seekOffsetMs = seekTargetMs;
-            if (isPlaying.get() && audioTrack != null) {
-                try { audioTrack.play(); } catch (Exception ignored) {}
-            }
-        }
-    }
-
-    // ── 释放 ──────────────────────────────────────────────
-
+    /** 释放所有资源 */
     public void release() {
+        isReleased = true;
+        isPlaying = false;
+        if (audioHandler != null) audioHandler.removeCallbacksAndMessages(null);
         releaseInternal();
     }
 
-    private void releaseInternal() {
-        isReleased.set(true);
-        decodeRunning.set(false);
-        isPlaying.set(false);
-        // 唤醒解码线程使其退出
-        synchronized (pauseLock) { pauseLock.notifyAll(); }
+    // ── 内部方法 ──
 
-        // 等待解码线程结束
-        Thread t = decodeThread;
-        if (t != null) {
-            try { t.join(500); } catch (InterruptedException ignored) {}
-            decodeThread = null;
+    private void releaseInternal() {
+        if (audioTrack != null) {
+            try { audioTrack.stop(); } catch (Exception ignored) {}
+            try { audioTrack.release(); } catch (Exception ignored) {}
+            audioTrack = null;
+        }
+        if (codec != null) {
+            try { codec.stop(); } catch (Exception ignored) {}
+            try { codec.release(); } catch (Exception ignored) {}
+            codec = null;
+        }
+        if (extractor != null) {
+            try { extractor.release(); } catch (Exception ignored) {}
+            extractor = null;
+        }
+        if (audioThread != null) {
+            try { audioThread.quitSafely(); } catch (Exception ignored) {}
+            audioThread = null;
+            audioHandler = null;
+        }
+    }
+
+    /** 投递解码-写入循环到后台线程 */
+    private void postDecodeLoop() {
+        if (audioHandler == null || isReleased) return;
+        audioHandler.post(this::decodeLoop);
+    }
+
+    /** 解码→写入 循环（运行在 HandlerThread 上） */
+    private void decodeLoop() {
+        if (isReleased || isSeeking || audioTrack == null || codec == null || extractor == null) return;
+
+        MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+        boolean sawInputEOS = false;
+        final long TIMEOUT_US = 10000;
+        int idleCount = 0;
+        final int MAX_IDLE = 300;
+
+        while (!isReleased && !isSeeking && !sawOutputEOS) {
+            boolean didWork = false;
+
+            // 喂压缩数据给 codec
+            if (!sawInputEOS) {
+                int inputBufIdx = codec.dequeueInputBuffer(TIMEOUT_US);
+                if (inputBufIdx >= 0) {
+                    ByteBuffer ib = codec.getInputBuffer(inputBufIdx);
+                    if (ib != null) {
+                        int size = extractor.readSampleData(ib, 0);
+                        if (size < 0) {
+                            codec.queueInputBuffer(inputBufIdx, 0, 0, 0,
+                                MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                            sawInputEOS = true;
+                        } else {
+                            codec.queueInputBuffer(inputBufIdx, 0, size,
+                                extractor.getSampleTime(), 0);
+                            extractor.advance();
+                        }
+                        didWork = true;
+                    }
+                }
+            }
+
+            // 取解码后的 PCM 写入 AudioTrack
+            int outBufIdx = codec.dequeueOutputBuffer(info, TIMEOUT_US);
+            if (outBufIdx >= 0) {
+                ByteBuffer ob = codec.getOutputBuffer(outBufIdx);
+                if (info.size > 0 && ob != null) {
+                    audioTrack.write(ob, info.size, AudioTrack.WRITE_BLOCKING);
+                }
+                codec.releaseOutputBuffer(outBufIdx, false);
+                didWork = true;
+
+                if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                    sawOutputEOS = true;
+                }
+            } else if (outBufIdx == MediaCodec.INFO_TRY_AGAIN_LATER) {
+                // 无输出，继续等
+            } else if (outBufIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                // PCM 格式通常不变，忽略
+            }
+
+            if (!didWork) {
+                idleCount++;
+                if (idleCount > MAX_IDLE) {
+                    Log.e(TAG, "decodeLoop timeout, aborting");
+                    break;
+                }
+            } else {
+                idleCount = 0;
+            }
         }
 
-        synchronized (codecLock) {
-            if (audioTrack != null) {
-                try {
-                    audioTrack.stop();
-                    audioTrack.flush();
-                } catch (Exception ignored) {}
-                try { audioTrack.release(); } catch (Exception ignored) {}
-                audioTrack = null;
-            }
-            if (codec != null) {
-                try { codec.stop(); } catch (Exception ignored) {}
-                try { codec.release(); } catch (Exception ignored) {}
-                codec = null;
-            }
-            if (extractor != null) {
-                try { extractor.release(); } catch (Exception ignored) {}
-                extractor = null;
-            }
+        // 播放完毕
+        if (sawOutputEOS && !isSeeking && !isReleased) {
+            isPlaying = false;
         }
     }
 }

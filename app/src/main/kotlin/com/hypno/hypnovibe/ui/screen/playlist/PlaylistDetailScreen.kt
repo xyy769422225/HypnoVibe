@@ -29,6 +29,8 @@ import androidx.compose.runtime.getValue
 fun PlaylistDetailScreen(playlistId: String, navController: NavController) {
     val vm: PlaySessionVM = viewModel()
     val current by vm.getCurrentPlaylist().collectAsState()
+    val currentTrackIdx by vm.getCurrentTrackIndex().collectAsState()
+    val isPlaying by vm.getIsPlayingState().collectAsState()
     val context = LocalContext.current
 
     LaunchedEffect(playlistId) { vm.openPlaylist(playlistId) }
@@ -95,6 +97,7 @@ fun PlaylistDetailScreen(playlistId: String, navController: NavController) {
                 }
                 items(tracks, key = { it.trackId }) { track ->
                     val index = tracks.indexOf(track)
+                    val isCurrent = index == currentTrackIdx
                     StoneCard {
                         Row(
                             modifier = Modifier
@@ -103,13 +106,26 @@ fun PlaylistDetailScreen(playlistId: String, navController: NavController) {
                                 .padding(8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            // 当前播放曲目：显示播放/暂停图标，用 BloodRed 高亮
+                            if (isCurrent) {
+                                Icon(
+                                    imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                    contentDescription = if (isPlaying) "播放中" else "已暂停",
+                                    tint = BloodRed,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                            }
                             Column(Modifier.weight(1f)) {
-                                Text(track.audioTitle, color = SilverGray)
+                                Text(
+                                    track.audioTitle,
+                                    color = if (isCurrent) GoldAncient else SilverGray
+                                )
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     if (track.durationMs > 0) {
                                         Text(
                                             "${track.durationMs / 60000}:${String.format("%02d", (track.durationMs / 1000) % 60)}",
-                                            color = DarkGray
+                                            color = if (isCurrent) BloodRed else DarkGray
                                         )
                                     }
                                     if (track.timelineScriptPath != null) Text("时间轴", color = DarkGreen)
@@ -178,7 +194,7 @@ private fun PlayerBar(vm: PlaySessionVM) {
                         Text(playModeLabel(vm), color = GoldAncient, style = MaterialTheme.typography.labelSmall)
                     }
                     DropdownMenu(expanded = modeExpanded, onDismissRequest = { modeExpanded = false }) {
-                        listOf("LOOP_LIST" to "列表循环", "STOP_AT_END" to "播完停止").forEach { (v, label) ->
+                        listOf("LOOP_LIST" to "列表循环", "LOOP_LAST" to "终曲循环", "STOP_AT_END" to "播完停止").forEach { (v, label) ->
                             DropdownMenuItem(
                                 text = { Text(label) },
                                 onClick = { vm.setPlayMode(v); modeExpanded = false }
@@ -231,6 +247,7 @@ private fun PlayerBar(vm: PlaySessionVM) {
 private fun playModeLabel(vm: PlaySessionVM): String {
     val current by vm.getCurrentPlaylist().collectAsState()
     return when (current?.playMode) {
+        "LOOP_LAST" -> "终曲循环"
         "STOP_AT_END" -> "播完停止"
         else -> "列表循环"
     }
@@ -240,7 +257,7 @@ private fun playModeLabel(vm: PlaySessionVM): String {
 private fun trackIndexLabel(vm: PlaySessionVM): String {
     val current by vm.getCurrentPlaylist().collectAsState()
     val tracks = current?.tracks ?: emptyList()
-    val idx = vm.getCurrentTrackIndex()
+    val idx = vm.getCurrentTrackIndex().collectAsState().value
     return if (idx >= 0 && tracks.isNotEmpty()) "${idx + 1}/${tracks.size}" else ""
 }
 

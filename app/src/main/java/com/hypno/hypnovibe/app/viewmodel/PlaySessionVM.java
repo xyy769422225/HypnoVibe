@@ -28,7 +28,7 @@ public class PlaySessionVM extends AndroidViewModel {
 
     // ── 音频状态 ──
     private AudioEngine audioEngine;
-    private int currentTrackIndex = -1;
+    private final MutableStateFlow<Integer> currentTrackIndex = StateFlowKt.MutableStateFlow(-1);
     private ScheduledExecutorService positionPoller;
     private volatile boolean completedFired = false;
 
@@ -74,7 +74,7 @@ public class PlaySessionVM extends AndroidViewModel {
     public StateFlow<Boolean> getIsPlayingState() { return isPlaying; }
     public StateFlow<Boolean> getIsLoading() { return isLoading; }
     public StateFlow<String> getErrorMsg() { return errorMsg; }
-    public int getCurrentTrackIndex() { return currentTrackIndex; }
+    public StateFlow<Integer> getCurrentTrackIndex() { return currentTrackIndex; }
 
     // ── 播放列表操作 ──
     public void loadPlaylists() { playlists.setValue(manager.listPlaylists()); }
@@ -136,7 +136,7 @@ public class PlaySessionVM extends AndroidViewModel {
                 }
 
                 // 3. 开始播放
-                currentTrackIndex = trackIndex;
+                currentTrackIndex.setValue(trackIndex);
                 durationMs.setValue(audioEngine.getDurationMs());
                 audioEngine.play();
                 isPlaying.setValue(true);
@@ -185,19 +185,22 @@ public class PlaySessionVM extends AndroidViewModel {
 
     public void playNext() {
         Playlist pl = currentPlaylist.getValue();
-        if (pl == null || currentTrackIndex < 0) return;
-        int next = currentTrackIndex + 1;
+        int idx = currentTrackIndex.getValue();
+        if (pl == null || idx < 0) return;
+        int next = idx + 1;
         String mode = pl.getPlayMode();
         if (next >= pl.getTracks().size()) {
             if ("LOOP_LIST".equals(mode)) next = 0;
+            else if ("LOOP_LAST".equals(mode)) { playTrack(idx); return; }
             else { isPlaying.setValue(false); return; }
         }
         playTrack(next);
     }
 
     public void playPrevious() {
-        if (currentTrackIndex <= 0) { seek(0); return; }
-        playTrack(currentTrackIndex - 1);
+        int idx = currentTrackIndex.getValue();
+        if (idx <= 0) { seek(0); return; }
+        playTrack(idx - 1);
     }
 
     private void startPositionPoller() {
@@ -223,7 +226,7 @@ public class PlaySessionVM extends AndroidViewModel {
                 completedFired = true;
                 isPlaying.setValue(false);
                 Playlist pl = currentPlaylist.getValue();
-                if (pl != null && "LOOP_LIST".equals(pl.getPlayMode())) {
+                if (pl != null && ("LOOP_LIST".equals(pl.getPlayMode()) || "LOOP_LAST".equals(pl.getPlayMode()))) {
                     playNext();
                 }
             }

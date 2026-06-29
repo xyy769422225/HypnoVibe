@@ -33,8 +33,10 @@ public class AudioEngine {
     private volatile long seekOffsetMs;  // seek 后补偿 headPosition 归零
     private volatile boolean isPlaying;
     private volatile boolean isReleased;
-    private volatile boolean isSeeking;
     private volatile boolean sawOutputEOS;
+    /** seek 请求标志，decodeLoop 检测后在自身线程执行 flush */
+    private volatile boolean seekRequested;
+    private volatile long seekTargetMs;
 
     // ── 公开 API ──
 
@@ -143,7 +145,7 @@ public class AudioEngine {
 
         seekOffsetMs = 0;
         isReleased = false;
-        isSeeking = false;
+        seekRequested = false;
         sawOutputEOS = false;
         Log.d(TAG, "loaded: " + sampleRate + "Hz " + channelCount + "ch " + durationMs + "ms");
         return true;
@@ -174,33 +176,24 @@ public class AudioEngine {
 
     /**
      * 跳转到指定位置（毫秒）。
-     * 原理：暂停 → flush 所有缓冲区 → extractor.seekTo → 重置 offset → 恢复
+     * 只设置标志位和目标位置，实际的 codec.flush 在 decodeLoop 线程内执行，
+     * 避免与解码线程并发访问 MediaCodec 导致 IllegalStateException。
      */
     public void seek(long ms) {
         if (isReleased || audioTrack == null || extractor == null || codec == null) return;
         if (ms < 0) ms = 0;
         if (durationMs > 0 && ms > durationMs) ms = durationMs;
 
-        isSeeking = true;
-        isPlaying = false;
-        if (audioHandler != null) audioHandler.removeCallbacksAndMessages(null);
-
-        try { audioTrack.pause(); } catch (Exception ignored) {}
-        try { audioTrack.flush(); } catch (Exception ignored) {}
-        try { codec.flush(); } catch (Exception ignored) {}
-
-        try {
-            extractor.seekTo(ms * 1000, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
-        } catch (Exception e) {
-            Log.e(TAG, "seekTo failed", e);
-        }
-
-        seekOffsetMs = ms;
+        seekTargetMs = ms;
+        seekRequested = true;
         sawOutputEOS = false;
-        isSeeking = false;
-        try { audioTrack.play(); } catch (Exception ignored) {}
-        isPlaying = true;
-        postDecodeLoop();
+        // 暂停 AudioTrack 输出，避免 flush 后继续播放旧缓冲
+        try { audioTrack.pause(); } catch (Exception ignored) {}
+        // 确保 decodeLoop 在运行以处理 seek（若已因 EOS 退出则重启）
+        if (audioHandler != null) {
+            audioHandler.removeCallbacksAndMessages(null);
+            postDecodeLoop();
+        }
     }
 
     /** 当前位置（毫秒），采样级精度 */
@@ -261,7 +254,7 @@ public class AudioEngine {
 
     /** 解码→写入 循环（运行在 HandlerThread 上） */
     private void decodeLoop() {
-        if (isReleased || isSeeking || audioTrack == null || codec == null || extractor == null) return;
+        if (isReleased || audioTrack == null || codec == null || extractor == null) return;
 
         MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
         boolean sawInputEOS = false;
@@ -269,7 +262,27 @@ public class AudioEngine {
         int idleCount = 0;
         final int MAX_IDLE = 300;
 
-        while (!isReleased && !isSeeking && !sawOutputEOS) {
+        while (!isReleased && !sawOutputEOS) {
+            // 在线程内安全处理 seek 请求（codec 只在本线程访问，避免并发崩溃）
+            if (seekRequested) {
+                seekRequested = false;
+                try {
+                    audioTrack.pause();
+                    audioTrack.flush();
+                    codec.flush();
+                    extractor.seekTo(seekTargetMs * 1000, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
+                } catch (Exception e) {
+                    Log.e(TAG, "seek failed", e);
+                }
+                seekOffsetMs = seekTargetMs;
+                sawInputEOS = false;
+                idleCount = 0;
+                if (isPlaying) {
+                    try { audioTrack.play(); } catch (Exception ignored) {}
+                }
+                continue;
+            }
+
             boolean didWork = false;
 
             // 喂压缩数据给 codec
@@ -324,7 +337,7 @@ public class AudioEngine {
         }
 
         // 播放完毕
-        if (sawOutputEOS && !isSeeking && !isReleased) {
+        if (sawOutputEOS && !seekRequested && !isReleased) {
             isPlaying = false;
         }
     }

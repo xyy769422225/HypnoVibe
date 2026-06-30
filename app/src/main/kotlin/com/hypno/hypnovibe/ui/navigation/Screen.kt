@@ -16,6 +16,7 @@ sealed class Screen(val route: String, val label: String, val icon: ImageVector)
     object ConfigEditor : Screen("config_editor/{configId}", "", Icons.Filled.Edit)
     object Waveform : Screen("waveform", "", Icons.Filled.GraphicEq)
     object CoyoteTest : Screen("coyote_test/{deviceId}", "", Icons.Filled.Bolt)
+    object LoveSpouseTest : Screen("love_spouse_test/{deviceId}", "", Icons.Filled.Bluetooth)
 
     /** 设备类型选择（添加设备第一步） */
     object DeviceTypePicker : Screen("device_type_picker", "", Icons.Filled.Add)

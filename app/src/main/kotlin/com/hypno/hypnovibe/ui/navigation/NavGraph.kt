@@ -12,6 +12,7 @@ import com.hypno.hypnovibe.ui.screen.device.CoyoteTestScreen
 import com.hypno.hypnovibe.ui.screen.device.DeviceConnectScreen
 import com.hypno.hypnovibe.ui.screen.device.DeviceScreen
 import com.hypno.hypnovibe.ui.screen.device.DeviceTypePickerScreen
+import com.hypno.hypnovibe.ui.screen.device.LoveSpouseTestScreen
 import com.hypno.hypnovibe.ui.screen.editor.TimelineEditorScreen
 import com.hypno.hypnovibe.ui.screen.home.HomeScreen
 import com.hypno.hypnovibe.ui.screen.playlist.ChannelMappingScreen
@@ -47,6 +48,12 @@ fun NavGraph(navController: NavHostController) {
             arguments = listOf(navArgument("deviceId") {})
         ) { entry ->
             CoyoteTestScreen(entry.arguments?.getString("deviceId") ?: "", navController)
+        }
+        composable(
+            route = Screen.LoveSpouseTest.route,
+            arguments = listOf(navArgument("deviceId") {})
+        ) { entry ->
+            LoveSpouseTestScreen(entry.arguments?.getString("deviceId") ?: "", navController)
         }
 
         // 添加设备：第一步 选择设备类型

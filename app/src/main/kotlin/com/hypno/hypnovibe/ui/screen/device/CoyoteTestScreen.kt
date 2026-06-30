@@ -20,7 +20,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavController
 import com.hypno.hypnovibe.app.viewmodel.CoyoteTestVM
-import com.hypno.hypnovibe.infrastructure.ble.adapter.coyote.CoyoteV3Adapter
+import com.hypno.hypnovibe.infrastructure.ble.adapter.coyote.CoyoteController
 import com.hypno.hypnovibe.ui.component.*
 import com.hypno.hypnovibe.ui.theme.*
 import kotlinx.coroutines.Dispatchers
@@ -51,8 +51,8 @@ fun CoyoteTestScreen(deviceId: String, navController: NavController) {
     // 进入页面时从 DeviceManagerVM 获取 adapter
     LaunchedEffect(deviceId) {
         val connected = deviceVm.findDevice(deviceId)
-        if (connected != null && connected.adapter is CoyoteV3Adapter) {
-            testVm.setAdapter(connected.adapter as CoyoteV3Adapter, connected.name)
+        if (connected != null && connected.adapter is CoyoteController) {
+            testVm.setController(connected.adapter as CoyoteController, connected.name)
         } else {
             Toast.makeText(context, "设备未找到", Toast.LENGTH_SHORT).show()
             navController.popBackStack()

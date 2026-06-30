@@ -31,7 +31,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * 测试面板通过 setManualStrength 手动设置目标强度，由内部 100ms 定时器统一发送 B0。
  */
-public class CoyoteV3Adapter implements DeviceProtocolAdapter {
+public class CoyoteV3Adapter implements DeviceProtocolAdapter, CoyoteController {
 
     private static final String TAG = "CoyoteV3Adapter";
     private static final String DEVICE_TYPE = "coyote_v3";
@@ -82,22 +82,16 @@ public class CoyoteV3Adapter implements DeviceProtocolAdapter {
     private int[] waveB = CoyoteB0Builder.basicWaveStrength();
 
     // ===== 测试回调 =====
-    private CoyoteListener coyoteListener;
+    private CoyoteController.CoyoteListener coyoteListener;
     private volatile boolean connected = false;
     private volatile boolean released = false;
-
-    /** 测试面板回调接口 */
-    public interface CoyoteListener {
-        void onStrengthFeedback(int a, int b);
-        void onConnected();
-        void onDisconnected();
-    }
 
     public CoyoteV3Adapter(String deviceId) {
         this.deviceId = deviceId;
     }
 
-    public void setCoyoteListener(CoyoteListener listener) {
+    @Override
+    public void setCoyoteListener(CoyoteController.CoyoteListener listener) {
         this.coyoteListener = listener;
     }
 

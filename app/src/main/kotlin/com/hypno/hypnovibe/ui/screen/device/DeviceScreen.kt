@@ -13,6 +13,7 @@ import androidx.compose.material.icons.filled.BluetoothDisabled
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -34,6 +35,9 @@ fun DeviceScreen(navController: NavController) {
     val vm = rememberDeviceManagerVM()
     val deviceList by vm.getDeviceList().collectAsState()
 
+    val coyoteDevices = deviceList.filter { !it.isVirtual }
+    val broadcastDevices = deviceList.filter { it.isVirtual }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -50,7 +54,7 @@ fun DeviceScreen(navController: NavController) {
     ) { padding ->
         Column(
             modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             if (deviceList.isEmpty()) {
                 StoneCard {
@@ -69,22 +73,51 @@ fun DeviceScreen(navController: NavController) {
                 }
             } else {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    items(deviceList, key = { it.mac }) { item ->
-                        SavedDeviceItem(
-                            item = item,
-                            onClick = {
-                                // 已连接：进入测试面板（当前仅郊狼）
-                                if (item.connected && item.deviceId != null) {
-                                    navController.navigate(
-                                        Screen.CoyoteTest.route.replace("{deviceId}", item.deviceId)
-                                    )
-                                } else {
-                                    vm.reconnectSaved(item.mac)
-                                }
-                            },
-                            onDisconnect = { vm.disconnectDevice(item.mac) },
-                            onDelete = { vm.removeSavedDevice(item.mac) }
-                        )
+
+                    // ===== 郊狼设备 =====
+                    if (coyoteDevices.isNotEmpty()) {
+                        item {
+                            SectionHeader(title = "郊狼设备", subtitle = "需要 BLE 配对连接")
+                        }
+                        items(coyoteDevices, key = { it.mac }) { item ->
+                            CoyoteDeviceItem(
+                                item = item,
+                                onClick = {
+                                    if (item.connected && item.deviceId != null) {
+                                        navController.navigate(
+                                            Screen.CoyoteTest.route.replace("{deviceId}", item.deviceId)
+                                        )
+                                    } else {
+                                        vm.reconnectSaved(item.mac)
+                                    }
+                                },
+                                onDisconnect = { vm.disconnectDevice(item.mac) },
+                                onDelete = { vm.removeSavedDevice(item.mac) }
+                            )
+                        }
+                    }
+
+                    // ===== 广播设备 =====
+                    if (broadcastDevices.isNotEmpty()) {
+                        item {
+                            Spacer(Modifier.height(4.dp))
+                            SectionHeader(title = "广播设备", subtitle = "无需配对，直接开启广播")
+                        }
+                        items(broadcastDevices, key = { it.mac }) { item ->
+                            BroadcastDeviceItem(
+                                item = item,
+                                onClick = {
+                                    if (item.connected && item.deviceId != null) {
+                                        navController.navigate(
+                                            Screen.LoveSpouseTest.route.replace("{deviceId}", item.deviceId)
+                                        )
+                                    } else {
+                                        vm.addBroadcastDevice(item.deviceType)
+                                    }
+                                },
+                                onToggleOff = { vm.disconnectDevice(item.mac) }
+                            )
+                        }
                     }
                 }
             }
@@ -94,25 +127,34 @@ fun DeviceScreen(navController: NavController) {
             // 管理快捷入口
             Text("管理", color = SilverGray)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                DungeonButton(
-                    text = "设备配置",
-                    onClick = { navController.navigate(Screen.ConfigList.route) },
-                    variant = ButtonVariant.SECONDARY,
-                    modifier = Modifier.weight(1f)
-                )
-                DungeonButton(
-                    text = "波形管理",
-                    onClick = { navController.navigate(Screen.Waveform.route) },
-                    variant = ButtonVariant.SECONDARY,
-                    modifier = Modifier.weight(1f)
-                )
+                DungeonButton("设备配置", onClick = { navController.navigate(Screen.ConfigList.route) },
+                    variant = ButtonVariant.SECONDARY, modifier = Modifier.weight(1f))
+                DungeonButton("波形管理", onClick = { navController.navigate(Screen.Waveform.route) },
+                    variant = ButtonVariant.SECONDARY, modifier = Modifier.weight(1f))
             }
         }
     }
 }
 
+// ══════════════════════════════════════════════════════
+//  分组标题
+// ══════════════════════════════════════════════════════
+
 @Composable
-private fun SavedDeviceItem(
+private fun SectionHeader(title: String, subtitle: String) {
+    Row(verticalAlignment = Alignment.Bottom) {
+        Text(title, color = GoldAncient, style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.width(8.dp))
+        Text(subtitle, color = DarkGray, style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+// ══════════════════════════════════════════════════════
+//  郊狼设备卡片
+// ══════════════════════════════════════════════════════
+
+@Composable
+private fun CoyoteDeviceItem(
     item: DeviceManagerVM.DeviceItem,
     onClick: () -> Unit,
     onDisconnect: () -> Unit,
@@ -120,8 +162,7 @@ private fun SavedDeviceItem(
 ) {
     val typeEntry = SUPPORTED_DEVICE_TYPES.firstOrNull { it.typeId == item.deviceType }
 
-    val stateText: String = when {
-        !item.connected -> "未连接"
+    val stateText = when {
         item.state == AdapterStatus.State.CONNECTED -> "已连接"
         item.state == AdapterStatus.State.CONNECTING -> "连接中..."
         item.state == AdapterStatus.State.RETRYING -> "重连中..."
@@ -140,7 +181,6 @@ private fun SavedDeviceItem(
             modifier = Modifier.fillMaxWidth().padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // 设备类型图标
             if (typeEntry != null) {
                 Image(
                     painter = painterResource(id = typeEntry.iconRes),
@@ -165,6 +205,58 @@ private fun SavedDeviceItem(
             }
             IconButton(onClick = onDelete) {
                 Icon(Icons.Filled.Delete, "删除", tint = DarkGray, modifier = Modifier.size(18.dp))
+            }
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════
+//  广播设备卡片
+// ══════════════════════════════════════════════════════
+
+@Composable
+private fun BroadcastDeviceItem(
+    item: DeviceManagerVM.DeviceItem,
+    onClick: () -> Unit,
+    onToggleOff: () -> Unit
+) {
+    val isOn = item.connected
+    val stateText = if (isOn) "广播已开启" else "广播已关闭"
+    val stateColor = if (isOn) DarkGreen else DarkGray
+
+    StoneCard {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // 广播图标
+            Icon(
+                Icons.Filled.Bluetooth, "广播",
+                tint = if (isOn) BloodRed else DarkGray,
+                modifier = Modifier.size(32.dp)
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f).clickable(onClick = onClick)) {
+                Text(item.name, color = GoldAncient)
+                Text(stateText, color = stateColor, style = MaterialTheme.typography.labelSmall)
+            }
+            when {
+                isOn -> {
+                    // 已开启：显示关闭按钮
+                    IconButton(onClick = onToggleOff) {
+                        Icon(Icons.Filled.Close, "关闭", tint = AlertRed, modifier = Modifier.size(20.dp))
+                    }
+                    // 点击卡片进入测试页
+                    IconButton(onClick = onClick) {
+                        Icon(Icons.Filled.PlayArrow, "控制", tint = BloodRed, modifier = Modifier.size(20.dp))
+                    }
+                }
+                else -> {
+                    // 已关闭：显示开启按钮
+                    IconButton(onClick = onClick) {
+                        Icon(Icons.Filled.PlayArrow, "开启", tint = BloodRed, modifier = Modifier.size(20.dp))
+                    }
+                }
             }
         }
     }

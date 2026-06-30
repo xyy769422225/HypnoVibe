@@ -26,13 +26,13 @@ public class BleScanner {
 
     private static final String TAG = "BleScanner";
 
-    /**
-     * 郊狼 V3 设备广播名前缀。
-     * 注意：必须与 {@code CoyoteConstants.V3_BROADCAST_NAME_PREFIX} 保持一致（"47L121"）。
-     * 使用较宽的 "47L121" 前缀可匹配所有 V3 设备（型号码 47L121000 + 序列号），
-     * 且不会误匹配其他 DG-LAB 配件（爪印 47L120300 / 灵猫 47L124000 / 负鼠 47L127000）。
-     */
+    /** 郊狼 V3 广播名前缀：47L121（含型号码 47L121000 及序列号） */
     public static final String COYOTE_V3_PREFIX = "47L121";
+    /** 郊狼 V2 广播名：D-LAB ESTIM01（精确匹配） */
+    public static final String COYOTE_V2_NAME = "D-LAB ESTIM01";
+    /** 郊狼全系列扫描前缀列表 */
+    public static final List<String> COYOTE_ALL_PREFIXES =
+            java.util.Arrays.asList(COYOTE_V3_PREFIX, COYOTE_V2_NAME);
 
     /** 扫描超时（毫秒） */
     private static final long SCAN_TIMEOUT_MS = 10000;

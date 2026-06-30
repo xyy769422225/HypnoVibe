@@ -12,12 +12,16 @@ import com.hypno.hypnovibe.domain.DeviceProtocolAdapter;
 import com.hypno.hypnovibe.domain.entity.ConnectedDevice;
 import com.hypno.hypnovibe.domain.entity.PairedDevice;
 import com.hypno.hypnovibe.infrastructure.ble.BleScanner;
+import com.hypno.hypnovibe.infrastructure.ble.adapter.coyote.CoyoteV2Adapter;
 import com.hypno.hypnovibe.infrastructure.ble.adapter.coyote.CoyoteV3Adapter;
+import com.hypno.hypnovibe.infrastructure.ble.adapter.lovespouse.LoveSpouseAdapter;
 import com.hypno.hypnovibe.infrastructure.persistence.DevicePrefs;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -41,8 +45,16 @@ import kotlinx.coroutines.flow.StateFlowKt;
 public class DeviceManagerVM extends AndroidViewModel {
     private static final String TAG = "DeviceManagerVM";
 
-    /** 唯一已实现的设备类型 */
+    /** 已实现的设备类型 */
     public static final String TYPE_COYOTE_V3 = "coyote_v3";
+    /** 广播型设备：Love Spouse（无需扫描配对，直接开启 BLE 广播控制） */
+    public static final String TYPE_LOVE_SPOUSE = "love_spouse";
+
+    /** 虚拟设备（广播型）的 MAC 占位前缀 */
+    private static final String VIRTUAL_MAC_PREFIX = "virtual:";
+
+    /** Love Spouse 虚拟设备的 MAC 标识（供 disconnect 等操作） */
+    public static final String VIRTUAL_MAC_PREFIX_FOR_LOVE_SPOUSE = VIRTUAL_MAC_PREFIX + TYPE_LOVE_SPOUSE;
 
     private final BleScanner bleScanner;
     private final DevicePrefs devicePrefs;
@@ -50,6 +62,13 @@ public class DeviceManagerVM extends AndroidViewModel {
 
     /** 运行时已连接设备：mac -> ConnectedDevice */
     private final ConcurrentMap<String, ConnectedDevice> connectedMap = new ConcurrentHashMap<>();
+
+    /**
+     * 可用虚拟设备类型注册表：deviceType → displayName。
+     * 虚拟设备无需扫描配对，用户一键开启。
+     * 插入顺序决定 UI 展示顺序。
+     */
+    private final Map<String, String> virtualDeviceTypes = new LinkedHashMap<>();
 
     /** 持久化的配对设备列表 */
     private final MutableStateFlow<List<PairedDevice>> savedDevices;
@@ -82,10 +101,15 @@ public class DeviceManagerVM extends AndroidViewModel {
         public final String deviceId;
         /** 已连接时的实时状态；未连接为 null */
         public final AdapterStatus.State state;
+        /** 是否为虚拟设备（广播型，无需扫描配对） */
+        public final boolean isVirtual;
+
         public DeviceItem(String mac, String name, String deviceType,
-                          boolean connected, String deviceId, AdapterStatus.State state) {
+                          boolean connected, String deviceId, AdapterStatus.State state,
+                          boolean isVirtual) {
             this.mac = mac; this.name = name; this.deviceType = deviceType;
             this.connected = connected; this.deviceId = deviceId; this.state = state;
+            this.isVirtual = isVirtual;
         }
     }
 
@@ -94,6 +118,10 @@ public class DeviceManagerVM extends AndroidViewModel {
         bleScanner = new BleScanner();
         devicePrefs = new DevicePrefs(app);
         savedDevices = StateFlowKt.MutableStateFlow(devicePrefs.loadAll());
+
+        // 注册可用虚拟设备类型
+        virtualDeviceTypes.put(TYPE_LOVE_SPOUSE, "Love Spouse 震动玩具");
+
         rebuildList();
     }
 
@@ -159,7 +187,7 @@ public class DeviceManagerVM extends AndroidViewModel {
             return;
         }
         String deviceId = UUID.randomUUID().toString();
-        DeviceProtocolAdapter adapter = createAdapter(deviceType, deviceId);
+        DeviceProtocolAdapter adapter = createAdapter(deviceType, name, deviceId);
         AdapterStatus status = buildStatus(mac);
 
         ConnectedDevice device = new ConnectedDevice(deviceId, name, mac, adapter,
@@ -196,6 +224,44 @@ public class DeviceManagerVM extends AndroidViewModel {
         if (cd != null) cd.getAdapter().release(); // 触发回调 DISCONNECTED，幂等处理
         markSavedConnected(mac, false);
         rebuildList();
+    }
+
+    // ══════════════════════════════════════════════════════
+    //  虚拟/广播设备（无需扫描配对）
+    // ══════════════════════════════════════════════════════
+
+    /** 开启虚拟设备广播 */
+    public void addBroadcastDevice(String deviceType) {
+        String mac = VIRTUAL_MAC_PREFIX + deviceType;
+
+        // 每种广播设备只允许一个实例
+        if (connectedMap.containsKey(mac)) {
+            errorMsg.setValue("广播已开启，无需重复添加");
+            return;
+        }
+
+        String name = virtualDeviceTypes.get(deviceType);
+        if (name == null) {
+            errorMsg.setValue("不支持的设备类型: " + deviceType);
+            return;
+        }
+
+        String deviceId = UUID.randomUUID().toString();
+        DeviceProtocolAdapter adapter = createAdapter(deviceType, name, deviceId);
+        AdapterStatus status = buildStatus(mac);
+
+        ConnectedDevice device = new ConnectedDevice(deviceId, name, mac, adapter,
+                AdapterStatus.State.CONNECTING);
+        connectedMap.put(mac, device);
+        rebuildList();
+
+        // address 对广播型设备无意义，传特殊值
+        adapter.connect(getApplication(), mac, status);
+    }
+
+    /** 获取已注册的虚拟设备类型列表（供 UI 动态生成） */
+    public Map<String, String> getVirtualDeviceTypes() {
+        return Collections.unmodifiableMap(virtualDeviceTypes);
     }
 
     /** 删除已保存的设备（同时断开） */
@@ -272,32 +338,58 @@ public class DeviceManagerVM extends AndroidViewModel {
         rebuildList();
     }
 
-    private DeviceProtocolAdapter createAdapter(String deviceType, String deviceId) {
-        // 当前仅实现郊狼 V3；其它类型预留
+    private DeviceProtocolAdapter createAdapter(String deviceType, String name, String deviceId) {
+        if (TYPE_LOVE_SPOUSE.equals(deviceType)) {
+            return new LoveSpouseAdapter(deviceId);
+        }
+        // 郊狼：根据广播名自动识别 V2/V3
+        if (BleScanner.COYOTE_V2_NAME.equals(name)) {
+            return new CoyoteV2Adapter(deviceId);
+        }
+        // 默认郊狼 V3
         return new CoyoteV3Adapter(deviceId);
     }
 
     private List<String> prefixesFor(String deviceType) {
         if (TYPE_COYOTE_V3.equals(deviceType)) {
-            return Collections.singletonList(BleScanner.COYOTE_V3_PREFIX);
+            // 郊狼类型同时扫描 V2("D-LAB ESTIM01") 和 V3("47L121") 前缀
+            return BleScanner.COYOTE_ALL_PREFIXES;
         }
-        // 默认按郊狼 V3 扫描（当前唯一实现）
-        return Collections.singletonList(BleScanner.COYOTE_V3_PREFIX);
+        // 默认按郊狼全系列扫描
+        return BleScanner.COYOTE_ALL_PREFIXES;
     }
 
     private void rebuildList() {
         List<DeviceItem> items = new ArrayList<>();
+
+        // 1. 已配对的实体设备（来自 DevicePrefs）
         for (PairedDevice pd : savedDevices.getValue()) {
             ConnectedDevice cd = connectedMap.get(pd.getMacAddress());
             String displayName = pd.getUserAlias() != null ? pd.getUserAlias() : pd.getOriginalName();
             if (cd != null) {
                 items.add(new DeviceItem(pd.getMacAddress(), displayName, pd.getDeviceType(),
-                        true, cd.getDeviceId(), cd.getState()));
+                        true, cd.getDeviceId(), cd.getState(), false));
             } else {
                 items.add(new DeviceItem(pd.getMacAddress(), displayName, pd.getDeviceType(),
-                        false, null, null));
+                        false, null, null, false));
             }
         }
+
+        // 2. 虚拟设备（广播型，无需配对，按注册顺序展示）
+        for (Map.Entry<String, String> entry : virtualDeviceTypes.entrySet()) {
+            String deviceType = entry.getKey();
+            String displayName = entry.getValue();
+            String vMac = VIRTUAL_MAC_PREFIX + deviceType;
+            ConnectedDevice cd = connectedMap.get(vMac);
+            if (cd != null) {
+                items.add(new DeviceItem(vMac, displayName, deviceType,
+                        true, cd.getDeviceId(), cd.getState(), true));
+            } else {
+                items.add(new DeviceItem(vMac, displayName, deviceType,
+                        false, null, null, true));
+            }
+        }
+
         deviceList.setValue(items);
     }
 

@@ -9,7 +9,7 @@ import com.hypno.hypnovibe.app.viewmodel.DeviceManagerVM
 
 /**
  * 可添加的设备类型定义（设备类型选择页使用）。
- * 当前仅郊狼 DG-Lab V3 已实现协议。
+ * 郊狼类型同时扫描 V2 和 V3 前缀，连接时根据广播名自动识别版本。
  */
 data class DeviceTypeEntry(
     val typeId: String,
@@ -23,8 +23,8 @@ data class DeviceTypeEntry(
 val SUPPORTED_DEVICE_TYPES: List<DeviceTypeEntry> = listOf(
     DeviceTypeEntry(
         typeId = DeviceManagerVM.TYPE_COYOTE_V3,
-        displayName = "郊狼 DG-LAB",
-        description = "脉冲主机 V3（双通道电刺激）",
+        displayName = "郊狼 DG-LAB (V2/V3)",
+        description = "脉冲主机 V2 & V3（双通道电刺激）",
         iconRes = R.drawable.ic_dglab,
         available = true
     )

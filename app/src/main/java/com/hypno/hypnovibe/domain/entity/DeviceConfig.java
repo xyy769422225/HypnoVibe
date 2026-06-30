@@ -42,19 +42,19 @@ public class DeviceConfig {
         private String channelId;
         private String channelName;
         private String deviceType;
-        private int minStrength;
-        private int maxStrength;
         private int defaultStrength;
+
+        // 保留以兼容旧 JSON 反序列化，新代码不应使用
+        @Deprecated private int minStrength;
+        @Deprecated private int maxStrength;
 
         public ChannelDef() {}
 
-        public ChannelDef(String channelName, String deviceType, int min, int max) {
+        public ChannelDef(String channelName, String deviceType, int defaultStrength) {
             this.channelId = UUID.randomUUID().toString();
             this.channelName = channelName;
             this.deviceType = deviceType;
-            this.minStrength = min;
-            this.maxStrength = max;
-            this.defaultStrength = min;
+            this.defaultStrength = defaultStrength;
         }
 
         public String getChannelId() { return channelId; }
@@ -66,13 +66,12 @@ public class DeviceConfig {
         public String getDeviceType() { return deviceType; }
         public void setDeviceType(String deviceType) { this.deviceType = deviceType; }
 
-        public int getMinStrength() { return minStrength; }
-        public void setMinStrength(int minStrength) { this.minStrength = minStrength; }
-
-        public int getMaxStrength() { return maxStrength; }
-        public void setMaxStrength(int maxStrength) { this.maxStrength = maxStrength; }
-
         public int getDefaultStrength() { return defaultStrength; }
         public void setDefaultStrength(int defaultStrength) { this.defaultStrength = defaultStrength; }
+
+        @Deprecated public int getMinStrength() { return minStrength; }
+        @Deprecated public void setMinStrength(int minStrength) { this.minStrength = minStrength; }
+        @Deprecated public int getMaxStrength() { return maxStrength; }
+        @Deprecated public void setMaxStrength(int maxStrength) { this.maxStrength = maxStrength; }
     }
 }

@@ -22,8 +22,8 @@ data class DeviceTypeEntry(
 /** 设备类型选择页展示的列表 */
 val SUPPORTED_DEVICE_TYPES: List<DeviceTypeEntry> = listOf(
     DeviceTypeEntry(
-        typeId = DeviceManagerVM.TYPE_COYOTE_V3,
-        displayName = "郊狼 DG-LAB (V2/V3)",
+        typeId = DeviceManagerVM.TYPE_DGLAB_V3,
+        displayName = "DG-LAB (V2/V3)",
         description = "脉冲主机 V2 & V3（双通道电刺激）",
         iconRes = R.drawable.ic_dglab,
         available = true

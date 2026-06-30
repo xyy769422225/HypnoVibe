@@ -5,22 +5,22 @@ import android.util.Log;
 
 import androidx.lifecycle.AndroidViewModel;
 
-import com.hypno.hypnovibe.infrastructure.ble.adapter.coyote.CoyoteController;
+import com.hypno.hypnovibe.infrastructure.ble.adapter.dglab.DGLabController;
 
 import kotlinx.coroutines.flow.MutableStateFlow;
 import kotlinx.coroutines.flow.StateFlow;
 import kotlinx.coroutines.flow.StateFlowKt;
 
 /**
- * 郊狼测试面板 ViewModel。
+ * DG-LAB 测试面板 ViewModel。
  * 仅负责当前选中设备的强度测试，不负责扫描/连接（由 DeviceManagerVM 负责）。
- * 通过 {@link CoyoteController} 统一接口操作 V2/V3 设备，不感知协议版本差异。
+ * 通过 {@link DGLabController} 统一接口操作 V2/V3 设备，不感知协议版本差异。
  */
-public class CoyoteTestVM extends AndroidViewModel {
-    private static final String TAG = "CoyoteTestVM";
+public class DGLabTestVM extends AndroidViewModel {
+    private static final String TAG = "DGLabTestVM";
     private static final int MAX_STRENGTH = 200;
 
-    private CoyoteController controller;
+    private DGLabController controller;
 
     private final MutableStateFlow<Integer> targetStrengthA = StateFlowKt.MutableStateFlow(0);
     private final MutableStateFlow<Integer> targetStrengthB = StateFlowKt.MutableStateFlow(0);
@@ -30,11 +30,10 @@ public class CoyoteTestVM extends AndroidViewModel {
     private final MutableStateFlow<Boolean> isConnected = StateFlowKt.MutableStateFlow(false);
     private final MutableStateFlow<String> deviceName = StateFlowKt.MutableStateFlow((String) null);
 
-    public CoyoteTestVM(Application app) {
+    public DGLabTestVM(Application app) {
         super(app);
     }
 
-    // ── StateFlow getters ──
     public StateFlow<Integer> getTargetStrengthA() { return targetStrengthA; }
     public StateFlow<Integer> getTargetStrengthB() { return targetStrengthB; }
     public StateFlow<Integer> getDeviceStrengthA() { return deviceStrengthA; }
@@ -43,12 +42,11 @@ public class CoyoteTestVM extends AndroidViewModel {
     public StateFlow<Boolean> getIsConnected() { return isConnected; }
     public StateFlow<String> getDeviceName() { return deviceName; }
 
-    /** 设置要测试的设备控制器（从 DeviceManagerVM 获取） */
-    public void setController(CoyoteController controller, String name) {
+    public void setController(DGLabController controller, String name) {
         this.controller = controller;
         this.deviceName.setValue(name);
 
-        controller.setCoyoteListener(new CoyoteController.CoyoteListener() {
+        controller.setDGLabListener(new DGLabController.DGLabListener() {
             @Override
             public void onStrengthFeedback(int a, int b) {
                 deviceStrengthA.setValue(a);
@@ -76,8 +74,6 @@ public class CoyoteTestVM extends AndroidViewModel {
         deviceStrengthB.setValue(controller.getDeviceStrengthB());
     }
 
-    // ── 强度控制 ──
-
     public void increaseChannelA() {
         int v = clamp(targetStrengthA.getValue() + 1);
         targetStrengthA.setValue(v);
@@ -102,15 +98,11 @@ public class CoyoteTestVM extends AndroidViewModel {
         if (controller != null) controller.setManualStrength(targetStrengthA.getValue(), v);
     }
 
-    // ── 安全开关 ──
-
-    /** 解锁安全开关 */
     public void unlockSafety() {
         if (controller != null) controller.unlockSafety();
         safetyOn.setValue(false);
     }
 
-    /** 紧急停止（一键归零） */
     public void emergencyStop() {
         if (controller != null) controller.emergencyStop();
         safetyOn.setValue(true);
@@ -121,7 +113,6 @@ public class CoyoteTestVM extends AndroidViewModel {
     @Override
     protected void onCleared() {
         super.onCleared();
-        // 注意：不释放 controller，由 DeviceManagerVM 统一管理生命周期
     }
 
     private static int clamp(int v) {

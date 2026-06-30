@@ -1,14 +1,14 @@
-package com.hypno.hypnovibe.infrastructure.ble.adapter.coyote;
+package com.hypno.hypnovibe.infrastructure.ble.adapter.dglab;
 
 /**
- * 郊狼协议常量定义。
+ * DG-LAB 协议常量定义。
  * <p>
  * 集中管理所有UUID、指令头、取值范围等常量，避免魔法数字散落各处。
- * package-private，仅郊狼子包内部使用。
+ * package-private，仅 dglab 子包内部使用。
  */
-final class CoyoteConstants {
+final class DGLabConstants {
 
-    private CoyoteConstants() {}
+    private DGLabConstants() {}
 
     // ===== V3 UUID（标准16-bit扩展） =====
 
@@ -140,8 +140,8 @@ final class CoyoteConstants {
 
     // ===== 设备类型标识 =====
 
-    static final String DEVICE_TYPE_V3 = "coyote_v3";
-    static final String DEVICE_TYPE_V2 = "coyote_v2";
+    static final String DEVICE_TYPE_V3 = "dglab_v3";
+    static final String DEVICE_TYPE_V2 = "dglab_v2";
 
     // ===== V2 蓝牙广播名称 =====
 

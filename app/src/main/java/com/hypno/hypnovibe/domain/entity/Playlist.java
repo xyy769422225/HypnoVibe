@@ -89,21 +89,62 @@ public class Playlist {
     }
 
     public static class ChannelMappingEntry {
-        private String deviceAlias;
-        private String macAddress;
-        private String timelineChannelId;
-        private String timelineChannelName;
+        /** 配置逻辑通道 ID（对应 DeviceConfig.ChannelDef.channelId） */
+        private String configChannelId;
 
-        public String getDeviceAlias() { return deviceAlias; }
-        public void setDeviceAlias(String deviceAlias) { this.deviceAlias = deviceAlias; }
+        /** "physical"（连接型需映射）或 "broadcast"（广播型自动生效） */
+        private String mappingType;
 
-        public String getMacAddress() { return macAddress; }
-        public void setMacAddress(String macAddress) { this.macAddress = macAddress; }
+        /** 目标设备 MAC（仅 physical） */
+        private String targetDeviceMac;
+        /** 目标物理通道 key，如 "A"/"B"（仅 physical） */
+        private String targetPhysicalChannelKey;
 
-        public String getTimelineChannelId() { return timelineChannelId; }
-        public void setTimelineChannelId(String timelineChannelId) { this.timelineChannelId = timelineChannelId; }
+        // 旧字段，保留反序列化兼容
+        @Deprecated private String deviceAlias;
+        @Deprecated private String macAddress;
+        @Deprecated private String timelineChannelId;
+        @Deprecated private String timelineChannelName;
 
-        public String getTimelineChannelName() { return timelineChannelName; }
-        public void setTimelineChannelName(String timelineChannelName) { this.timelineChannelName = timelineChannelName; }
+        public ChannelMappingEntry() {}
+
+        public static ChannelMappingEntry physical(
+                String configChannelId, String targetDeviceMac,
+                String targetPhysicalChannelKey) {
+            ChannelMappingEntry e = new ChannelMappingEntry();
+            e.configChannelId = configChannelId;
+            e.mappingType = "physical";
+            e.targetDeviceMac = targetDeviceMac;
+            e.targetPhysicalChannelKey = targetPhysicalChannelKey;
+            return e;
+        }
+
+        public static ChannelMappingEntry broadcast(String configChannelId) {
+            ChannelMappingEntry e = new ChannelMappingEntry();
+            e.configChannelId = configChannelId;
+            e.mappingType = "broadcast";
+            return e;
+        }
+
+        public String getConfigChannelId() { return configChannelId; }
+        public void setConfigChannelId(String configChannelId) { this.configChannelId = configChannelId; }
+
+        public String getMappingType() { return mappingType; }
+        public void setMappingType(String mappingType) { this.mappingType = mappingType; }
+
+        public String getTargetDeviceMac() { return targetDeviceMac; }
+        public void setTargetDeviceMac(String targetDeviceMac) { this.targetDeviceMac = targetDeviceMac; }
+
+        public String getTargetPhysicalChannelKey() { return targetPhysicalChannelKey; }
+        public void setTargetPhysicalChannelKey(String targetPhysicalChannelKey) { this.targetPhysicalChannelKey = targetPhysicalChannelKey; }
+
+        @Deprecated public String getDeviceAlias() { return deviceAlias; }
+        @Deprecated public void setDeviceAlias(String deviceAlias) { this.deviceAlias = deviceAlias; }
+        @Deprecated public String getMacAddress() { return macAddress; }
+        @Deprecated public void setMacAddress(String macAddress) { this.macAddress = macAddress; }
+        @Deprecated public String getTimelineChannelId() { return timelineChannelId; }
+        @Deprecated public void setTimelineChannelId(String timelineChannelId) { this.timelineChannelId = timelineChannelId; }
+        @Deprecated public String getTimelineChannelName() { return timelineChannelName; }
+        @Deprecated public void setTimelineChannelName(String timelineChannelName) { this.timelineChannelName = timelineChannelName; }
     }
 }

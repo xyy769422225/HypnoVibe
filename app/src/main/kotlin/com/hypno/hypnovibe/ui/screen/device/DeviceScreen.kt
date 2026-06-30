@@ -35,7 +35,7 @@ fun DeviceScreen(navController: NavController) {
     val vm = rememberDeviceManagerVM()
     val deviceList by vm.getDeviceList().collectAsState()
 
-    val coyoteDevices = deviceList.filter { !it.isVirtual }
+    val dglabDevices = deviceList.filter { !it.isVirtual }
     val broadcastDevices = deviceList.filter { it.isVirtual }
 
     Scaffold(
@@ -74,18 +74,18 @@ fun DeviceScreen(navController: NavController) {
             } else {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
 
-                    // ===== 郊狼设备 =====
-                    if (coyoteDevices.isNotEmpty()) {
+                    // ===== DG-LAB 设备 =====
+                    if (dglabDevices.isNotEmpty()) {
                         item {
-                            SectionHeader(title = "郊狼设备", subtitle = "需要 BLE 配对连接")
+                            SectionHeader(title = "DG-LAB 设备", subtitle = "需要 BLE 配对连接")
                         }
-                        items(coyoteDevices, key = { it.mac }) { item ->
-                            CoyoteDeviceItem(
+                        items(dglabDevices, key = { it.mac }) { item ->
+                            DGLabDeviceItem(
                                 item = item,
                                 onClick = {
                                     if (item.connected && item.deviceId != null) {
                                         navController.navigate(
-                                            Screen.CoyoteTest.route.replace("{deviceId}", item.deviceId)
+                                            Screen.DGLabTest.route.replace("{deviceId}", item.deviceId)
                                         )
                                     } else {
                                         vm.reconnectSaved(item.mac)
@@ -154,7 +154,7 @@ private fun SectionHeader(title: String, subtitle: String) {
 // ══════════════════════════════════════════════════════
 
 @Composable
-private fun CoyoteDeviceItem(
+private fun DGLabDeviceItem(
     item: DeviceManagerVM.DeviceItem,
     onClick: () -> Unit,
     onDisconnect: () -> Unit,

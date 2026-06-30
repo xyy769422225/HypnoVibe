@@ -1,13 +1,13 @@
-package com.hypno.hypnovibe.infrastructure.ble.adapter.coyote;
+package com.hypno.hypnovibe.infrastructure.ble.adapter.dglab;
 
 /**
- * 郊狼 V3 波形频率换算。
+ * DG-LAB V3 波形频率换算。
  * 用户输入值（10-1000ms）转换为协议值（10-240）。
- * package-private，仅郊狼子包内部使用。
+ * package-private，仅 dglab 子包内部使用。
  */
-final class CoyoteFrequencyConverter {
+final class DGLabFrequencyConverter {
 
-    private CoyoteFrequencyConverter() {}
+    private DGLabFrequencyConverter() {}
 
     /**
      * @param inputMs 用户输入的波形周期（毫秒），范围 10-1000

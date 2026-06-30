@@ -1,4 +1,4 @@
-package com.hypno.hypnovibe.infrastructure.ble.adapter.coyote;
+package com.hypno.hypnovibe.infrastructure.ble.adapter.dglab;
 
 import android.annotation.SuppressLint;
 import android.bluetooth.BluetoothAdapter;
@@ -24,19 +24,16 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * 郊狼 V3 设备适配器。
+ * DG-LAB V3 设备适配器。
  *
- * 完整实现 DeviceProtocolAdapter 接口，Phase 4 中 connect/disconnect/release/emergencyStop
- * 完整可用，updateSnapshot/validateSegmentData 留空（Phase 5 填充）。
- *
- * 测试面板通过 setManualStrength 手动设置目标强度，由内部 100ms 定时器统一发送 B0。
+ * 完整实现 DeviceProtocolAdapter 接口，connect/disconnect/release/emergencyStop
+ * 完整可用。测试面板通过 setManualStrength 手动设置目标强度，由内部 100ms 定时器统一发送 B0。
  */
-public class CoyoteV3Adapter implements DeviceProtocolAdapter, CoyoteController {
+public class DGLabV3Adapter implements DeviceProtocolAdapter, DGLabController {
 
-    private static final String TAG = "CoyoteV3Adapter";
-    private static final String DEVICE_TYPE = "coyote_v3";
+    private static final String TAG = "DGLabV3Adapter";
+    private static final String DEVICE_TYPE = "dglab_v3";
 
-    // GATT UUID
     private static final UUID SERVICE_UUID =
             UUID.fromString("0000180c-0000-1000-8000-00805f9b34fb");
     private static final UUID CHAR_WRITE =
@@ -49,55 +46,43 @@ public class CoyoteV3Adapter implements DeviceProtocolAdapter, CoyoteController 
     private static final long B1_TIMEOUT_MS = 500;
     private static final long TIMER_INTERVAL_MS = 100;
 
-    // ===== 标识 =====
     private final String deviceId;
-
-    // ===== BLE =====
     private Context context;
     private BluetoothGatt gatt;
     private BluetoothGattCharacteristic writeChar;
     private BluetoothGattCharacteristic notifyChar;
     private AdapterStatus statusCallback;
 
-    // ===== 定时器 =====
     private ScheduledExecutorService timer;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
-    // ===== 强度状态 =====
     private volatile int targetStrengthA = 0;
     private volatile int targetStrengthB = 0;
     private volatile int deviceStrengthA = 0;
     private volatile int deviceStrengthB = 0;
     private volatile boolean safetyOn = true;
 
-    // ===== 流控状态 =====
     private final AtomicInteger pendingSeqNo = new AtomicInteger(0);
     private volatile boolean waitingConfirm = false;
     private long lastB1Time = 0;
 
-    // ===== 波形（Phase 4 固定基础波形） =====
-    private int[] freqA = CoyoteB0Builder.basicFreq();
-    private int[] waveA = CoyoteB0Builder.basicWaveStrength();
-    private int[] freqB = CoyoteB0Builder.basicFreq();
-    private int[] waveB = CoyoteB0Builder.basicWaveStrength();
+    private int[] freqA = DGLabB0Builder.basicFreq();
+    private int[] waveA = DGLabB0Builder.basicWaveStrength();
+    private int[] freqB = DGLabB0Builder.basicFreq();
+    private int[] waveB = DGLabB0Builder.basicWaveStrength();
 
-    // ===== 测试回调 =====
-    private CoyoteController.CoyoteListener coyoteListener;
+    private DGLabController.DGLabListener dglabListener;
     private volatile boolean connected = false;
     private volatile boolean released = false;
 
-    public CoyoteV3Adapter(String deviceId) {
+    public DGLabV3Adapter(String deviceId) {
         this.deviceId = deviceId;
     }
 
     @Override
-    public void setCoyoteListener(CoyoteController.CoyoteListener listener) {
-        this.coyoteListener = listener;
+    public void setDGLabListener(DGLabController.DGLabListener listener) {
+        this.dglabListener = listener;
     }
-
-    // ══════════════════════════════════════════════════════
-    //  DeviceProtocolAdapter 实现
-    // ══════════════════════════════════════════════════════
 
     @Override public String getDeviceType() { return DEVICE_TYPE; }
     @Override public String getDeviceId() { return deviceId; }
@@ -124,17 +109,14 @@ public class CoyoteV3Adapter implements DeviceProtocolAdapter, CoyoteController 
         stopTimer();
         connected = false;
         if (gatt != null) {
-            try {
-                gatt.disconnect();
-                gatt.close();
-            } catch (Exception ignored) {}
+            try { gatt.disconnect(); gatt.close(); } catch (Exception ignored) {}
             gatt = null;
         }
         writeChar = null;
         notifyChar = null;
         safetyOn = true;
         notifyState(AdapterStatus.State.DISCONNECTED, "已断开");
-        if (coyoteListener != null) coyoteListener.onDisconnected();
+        if (dglabListener != null) dglabListener.onDisconnected();
     }
 
     @Override
@@ -146,12 +128,12 @@ public class CoyoteV3Adapter implements DeviceProtocolAdapter, CoyoteController 
     @Override
     public void updateSnapshot(Map<String, byte[]> channelData,
                                Map<String, Long> offsetsInSegment) {
-        // Phase 5 填充：反序列化 protobuf，更新 freqA/waveA/freqB/waveB
+        // Phase 5.5 填充：从快照提取波形数据更新 freqA/waveA/freqB/waveB
     }
 
     @Override
     public void flush() {
-        // Phase 5 填充：清空波形缓冲
+        // Phase 5.5 填充：清空波形缓冲
     }
 
     @Override
@@ -159,13 +141,11 @@ public class CoyoteV3Adapter implements DeviceProtocolAdapter, CoyoteController 
         targetStrengthA = 0;
         targetStrengthB = 0;
         safetyOn = true;
-        // 立即发送归零 B0，绕开定时器
         int seq = nextSeqNo();
-        byte[] cmd = CoyoteB0Builder.buildB0(
+        byte[] cmd = DGLabB0Builder.buildB0(
             true, seq,
-            CoyoteB0Builder.MODE_ABSOLUTE, CoyoteB0Builder.MODE_ABSOLUTE,
-            0, 0,
-            freqA, waveA, freqB, waveB);
+            DGLabB0Builder.MODE_ABSOLUTE, DGLabB0Builder.MODE_ABSOLUTE,
+            0, 0, freqA, waveA, freqB, waveB);
         writeCharacteristic(cmd);
         waitingConfirm = true;
         pendingSeqNo.set(seq);
@@ -173,30 +153,22 @@ public class CoyoteV3Adapter implements DeviceProtocolAdapter, CoyoteController 
 
     @Override
     public boolean validateSegmentData(byte[] protobufBytes) {
-        return false; // Phase 5 填充
+        return false;
     }
 
     // ══════════════════════════════════════════════════════
     //  测试面板专用 API
     // ══════════════════════════════════════════════════════
 
-    /** 手动设置目标强度（0-200），由 100ms 定时器统一发送 */
     public void setManualStrength(int a, int b) {
         targetStrengthA = clamp(a, 0, 200);
         targetStrengthB = clamp(b, 0, 200);
     }
 
-    /** 获取设备回报的实际强度（B1 更新） */
     public int getDeviceStrengthA() { return deviceStrengthA; }
     public int getDeviceStrengthB() { return deviceStrengthB; }
-
     public boolean isSafetyOn() { return safetyOn; }
-
-    /** 解锁安全开关，允许定时器发送强度 */
-    public void unlockSafety() {
-        safetyOn = false;
-    }
-
+    public void unlockSafety() { safetyOn = false; }
     public boolean isConnected() { return connected && !released; }
 
     // ══════════════════════════════════════════════════════
@@ -217,7 +189,7 @@ public class CoyoteV3Adapter implements DeviceProtocolAdapter, CoyoteController 
                 safetyOn = true;
                 mainHandler.post(() -> {
                     notifyState(AdapterStatus.State.DISCONNECTED, "设备断开");
-                    if (coyoteListener != null) coyoteListener.onDisconnected();
+                    if (dglabListener != null) dglabListener.onDisconnected();
                 });
             }
         }
@@ -236,7 +208,6 @@ public class CoyoteV3Adapter implements DeviceProtocolAdapter, CoyoteController 
                 return;
             }
 
-            // 绑定 Notify
             g.setCharacteristicNotification(notifyChar, true);
             BluetoothGattDescriptor desc = notifyChar.getDescriptor(DESCRIPTOR_UUID);
             if (desc != null) {
@@ -244,18 +215,16 @@ public class CoyoteV3Adapter implements DeviceProtocolAdapter, CoyoteController 
                 g.writeDescriptor(desc);
             }
 
-            // 写入 BF 默认值（延迟 200ms 确保 descriptor 写入完成）
             mainHandler.postDelayed(() -> {
                 if (released || gatt == null) return;
-                byte[] bf = CoyoteB0Builder.buildDefaultBF();
+                byte[] bf = DGLabB0Builder.buildDefaultBF();
                 writeChar.setValue(bf);
                 gatt.writeCharacteristic(writeChar);
 
-                // 启动 100ms 定时器
                 startTimer();
                 connected = true;
                 notifyState(AdapterStatus.State.CONNECTED, "连接成功");
-                if (coyoteListener != null) coyoteListener.onConnected();
+                if (dglabListener != null) dglabListener.onConnected();
             }, 200);
         }
 
@@ -277,7 +246,6 @@ public class CoyoteV3Adapter implements DeviceProtocolAdapter, CoyoteController 
         int seqNo = data[1] & 0xFF;
         int a = data[2] & 0xFF;
         int b = data[3] & 0xFF;
-
         deviceStrengthA = a;
         deviceStrengthB = b;
         lastB1Time = System.currentTimeMillis();
@@ -287,8 +255,8 @@ public class CoyoteV3Adapter implements DeviceProtocolAdapter, CoyoteController 
             pendingSeqNo.set(0);
         }
 
-        if (coyoteListener != null) {
-            coyoteListener.onStrengthFeedback(a, b);
+        if (dglabListener != null) {
+            dglabListener.onStrengthFeedback(a, b);
         }
     }
 
@@ -300,40 +268,24 @@ public class CoyoteV3Adapter implements DeviceProtocolAdapter, CoyoteController 
         if (timer != null) return;
         timer = Executors.newSingleThreadScheduledExecutor();
         timer.scheduleAtFixedRate(() -> {
-            try {
-                onTimerTick();
-            } catch (Exception e) {
-                Log.e(TAG, "timer tick error", e);
-            }
+            try { onTimerTick(); } catch (Exception e) { Log.e(TAG, "timer tick error", e); }
         }, 0, TIMER_INTERVAL_MS, TimeUnit.MILLISECONDS);
     }
 
     private void stopTimer() {
-        if (timer != null) {
-            timer.shutdownNow();
-            timer = null;
-        }
+        if (timer != null) { timer.shutdownNow(); timer = null; }
     }
 
     private void onTimerTick() {
         if (released || !connected || gatt == null || writeChar == null) return;
 
-        // B1 超时检查
         if (waitingConfirm && System.currentTimeMillis() - lastB1Time > B1_TIMEOUT_MS) {
             waitingConfirm = false;
             pendingSeqNo.set(0);
         }
 
-        if (safetyOn) {
-            // 安全模式：仅发波形，强度不变
-            sendB0StrengthUnchanged();
-            return;
-        }
-
-        if (waitingConfirm) {
-            sendB0StrengthUnchanged();
-            return;
-        }
+        if (safetyOn) { sendB0StrengthUnchanged(); return; }
+        if (waitingConfirm) { sendB0StrengthUnchanged(); return; }
 
         boolean needChangeA = targetStrengthA != deviceStrengthA;
         boolean needChangeB = targetStrengthB != deviceStrengthB;
@@ -342,11 +294,9 @@ public class CoyoteV3Adapter implements DeviceProtocolAdapter, CoyoteController 
             int seq = nextSeqNo();
             pendingSeqNo.set(seq);
             waitingConfirm = true;
-
-            int modeA = needChangeA ? CoyoteB0Builder.MODE_ABSOLUTE : CoyoteB0Builder.MODE_UNCHANGED;
-            int modeB = needChangeB ? CoyoteB0Builder.MODE_ABSOLUTE : CoyoteB0Builder.MODE_UNCHANGED;
-
-            byte[] cmd = CoyoteB0Builder.buildB0(
+            int modeA = needChangeA ? DGLabB0Builder.MODE_ABSOLUTE : DGLabB0Builder.MODE_UNCHANGED;
+            int modeB = needChangeB ? DGLabB0Builder.MODE_ABSOLUTE : DGLabB0Builder.MODE_UNCHANGED;
+            byte[] cmd = DGLabB0Builder.buildB0(
                 true, seq, modeA, modeB,
                 targetStrengthA, targetStrengthB,
                 freqA, waveA, freqB, waveB);
@@ -357,28 +307,20 @@ public class CoyoteV3Adapter implements DeviceProtocolAdapter, CoyoteController 
     }
 
     private void sendB0StrengthUnchanged() {
-        byte[] cmd = CoyoteB0Builder.buildB0(
+        byte[] cmd = DGLabB0Builder.buildB0(
             false, 0,
-            CoyoteB0Builder.MODE_UNCHANGED, CoyoteB0Builder.MODE_UNCHANGED,
-            0, 0,
-            freqA, waveA, freqB, waveB);
+            DGLabB0Builder.MODE_UNCHANGED, DGLabB0Builder.MODE_UNCHANGED,
+            0, 0, freqA, waveA, freqB, waveB);
         writeCharacteristic(cmd);
     }
-
-    // ══════════════════════════════════════════════════════
-    //  工具方法
-    // ══════════════════════════════════════════════════════
 
     @SuppressLint("MissingPermission")
     private void writeCharacteristic(byte[] value) {
         if (gatt == null || writeChar == null) return;
         writeChar.setValue(value);
         boolean ok = gatt.writeCharacteristic(writeChar);
-        if (!ok) {
-            Log.w(TAG, "writeCharacteristic failed");
-            if (statusCallback != null) {
-                statusCallback.onCycleStats(deviceId, 0, false);
-            }
+        if (!ok && statusCallback != null) {
+            statusCallback.onCycleStats(deviceId, 0, false);
         }
     }
 

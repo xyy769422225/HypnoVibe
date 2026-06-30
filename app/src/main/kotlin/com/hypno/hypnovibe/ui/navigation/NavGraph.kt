@@ -8,7 +8,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
 import com.hypno.hypnovibe.ui.screen.config.ConfigEditorScreen
 import com.hypno.hypnovibe.ui.screen.config.ConfigListScreen
-import com.hypno.hypnovibe.ui.screen.device.CoyoteTestScreen
+import com.hypno.hypnovibe.ui.screen.device.DGLabTestScreen
 import com.hypno.hypnovibe.ui.screen.device.DeviceConnectScreen
 import com.hypno.hypnovibe.ui.screen.device.DeviceScreen
 import com.hypno.hypnovibe.ui.screen.device.DeviceTypePickerScreen
@@ -34,7 +34,12 @@ fun NavGraph(navController: NavHostController) {
         ) { entry ->
             PlaylistDetailScreen(entry.arguments?.getString("playlistId") ?: "", navController)
         }
-        composable(Screen.ChannelMapping.route) { ChannelMappingScreen() }
+        composable(
+            route = Screen.ChannelMapping.route,
+            arguments = listOf(navArgument("playlistId") { })
+        ) { entry ->
+            ChannelMappingScreen(entry.arguments?.getString("playlistId") ?: "", navController)
+        }
         composable(Screen.ConfigList.route) { ConfigListScreen(navController) }
         composable(
             route = Screen.ConfigEditor.route,
@@ -44,10 +49,10 @@ fun NavGraph(navController: NavHostController) {
         }
         composable(Screen.Waveform.route) { WaveformScreen() }
         composable(
-            route = Screen.CoyoteTest.route,
+            route = Screen.DGLabTest.route,
             arguments = listOf(navArgument("deviceId") {})
         ) { entry ->
-            CoyoteTestScreen(entry.arguments?.getString("deviceId") ?: "", navController)
+            DGLabTestScreen(entry.arguments?.getString("deviceId") ?: "", navController)
         }
         composable(
             route = Screen.LoveSpouseTest.route,

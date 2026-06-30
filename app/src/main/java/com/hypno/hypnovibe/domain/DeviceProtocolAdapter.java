@@ -11,7 +11,7 @@ import java.util.Map;
 public interface DeviceProtocolAdapter {
 
     // ===== 标识 =====
-    /** 设备类型标识（如 "coyote_v3", "coyote_v2", "lovense_vibrate"） */
+    /** 设备类型标识（如 "dglab_v3", "dglab_v2", "love_spouse"） */
     String getDeviceType();
     /** 设备实例唯一ID（用于日志/统计） */
     String getDeviceId();

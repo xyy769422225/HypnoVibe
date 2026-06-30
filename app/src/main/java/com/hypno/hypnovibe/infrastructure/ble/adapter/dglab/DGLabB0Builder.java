@@ -1,11 +1,11 @@
-package com.hypno.hypnovibe.infrastructure.ble.adapter.coyote;
+package com.hypno.hypnovibe.infrastructure.ble.adapter.dglab;
 
 /**
- * 郊狼 V3 协议指令构造器。
+ * DG-LAB V3 协议指令构造器。
  * 负责 B0（核心控制）和 BF（软上限与平衡参数）指令的字节构造。
- * package-private，仅郊狼子包内部使用。
+ * package-private，仅 dglab 子包内部使用。
  */
-final class CoyoteB0Builder {
+final class DGLabB0Builder {
 
     /** B0 指令头 */
     static final byte B0_HEADER = (byte) 0xB0;
@@ -13,12 +13,12 @@ final class CoyoteB0Builder {
     static final byte BF_HEADER = (byte) 0xBF;
 
     // 强度解读方式
-    static final int MODE_UNCHANGED = 0;  // 强度不变
-    static final int MODE_RELATIVE_INC = 1;  // 相对增加
-    static final int MODE_RELATIVE_DEC = 2;  // 相对减少
-    static final int MODE_ABSOLUTE = 3;      // 绝对设置
+    static final int MODE_UNCHANGED = 0;
+    static final int MODE_RELATIVE_INC = 1;
+    static final int MODE_RELATIVE_DEC = 2;
+    static final int MODE_ABSOLUTE = 3;
 
-    private CoyoteB0Builder() {}
+    private DGLabB0Builder() {}
 
     /**
      * 构造 B0 指令（20 bytes）。
@@ -60,13 +60,6 @@ final class CoyoteB0Builder {
 
     /**
      * 构造 BF 指令（7 bytes）。
-     *
-     * @param softLimitA A通道强度软上限 0-200
-     * @param softLimitB B通道强度软上限 0-200
-     * @param balance1A  A通道频率平衡参数1 0-255
-     * @param balance1B  B通道频率平衡参数1 0-255
-     * @param balance2A  A通道频率平衡参数2 0-255
-     * @param balance2B  B通道频率平衡参数2 0-255
      */
     static byte[] buildBF(int softLimitA, int softLimitB,
                           int balance1A, int balance1B,

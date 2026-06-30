@@ -21,6 +21,7 @@ import androidx.navigation.NavController
 import com.hypno.hypnovibe.app.viewmodel.PlaySessionVM
 import com.hypno.hypnovibe.ui.component.*
 import com.hypno.hypnovibe.ui.theme.*
+import com.hypno.hypnovibe.ui.navigation.Screen
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 
@@ -68,6 +69,11 @@ fun PlaylistDetailScreen(playlistId: String, navController: NavController) {
                     }
                 },
                 actions = {
+                    IconButton(onClick = {
+                        navController.navigate(Screen.ChannelMapping.route.replace("{playlistId}", playlistId))
+                    }) {
+                        Icon(Icons.Filled.Settings, "通道映射", tint = SilverGray)
+                    }
                     IconButton(onClick = { audioPicker.launch(arrayOf("audio/*")) }) {
                         Icon(Icons.Filled.Add, "添加曲目", tint = BloodRed)
                     }

@@ -94,6 +94,7 @@ public class PlaySessionVM extends AndroidViewModel {
     public void setPlayMode(String mode) { Playlist p = currentPlaylist.getValue(); if (p != null) { p.setPlayMode(mode); manager.save(p); currentPlaylist.setValue(p); } }
     public void renamePlaylist(String id, String newName) { Playlist p = manager.findById(id); if (p != null) { manager.rename(p, newName); loadPlaylists(); } }
     public void deletePlaylist(String id) { manager.deletePlaylist(id); currentPlaylist.setValue(null); loadPlaylists(); }
+    public void savePlaylist(Playlist p) { manager.save(p); }
 
     // ══════════════════════════════════════════════════════
     //  音频播放 — 全异步，主线程零阻塞

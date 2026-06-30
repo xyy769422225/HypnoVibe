@@ -12,8 +12,8 @@ import com.hypno.hypnovibe.domain.DeviceProtocolAdapter;
 import com.hypno.hypnovibe.domain.entity.ConnectedDevice;
 import com.hypno.hypnovibe.domain.entity.PairedDevice;
 import com.hypno.hypnovibe.infrastructure.ble.BleScanner;
-import com.hypno.hypnovibe.infrastructure.ble.adapter.coyote.CoyoteV2Adapter;
-import com.hypno.hypnovibe.infrastructure.ble.adapter.coyote.CoyoteV3Adapter;
+import com.hypno.hypnovibe.infrastructure.ble.adapter.dglab.DGLabV2Adapter;
+import com.hypno.hypnovibe.infrastructure.ble.adapter.dglab.DGLabV3Adapter;
 import com.hypno.hypnovibe.infrastructure.ble.adapter.lovespouse.LoveSpouseAdapter;
 import com.hypno.hypnovibe.infrastructure.persistence.DevicePrefs;
 
@@ -46,7 +46,7 @@ public class DeviceManagerVM extends AndroidViewModel {
     private static final String TAG = "DeviceManagerVM";
 
     /** 已实现的设备类型 */
-    public static final String TYPE_COYOTE_V3 = "coyote_v3";
+    public static final String TYPE_DGLAB_V3 = "dglab_v3";
     /** 广播型设备：Love Spouse（无需扫描配对，直接开启 BLE 广播控制） */
     public static final String TYPE_LOVE_SPOUSE = "love_spouse";
 
@@ -344,14 +344,14 @@ public class DeviceManagerVM extends AndroidViewModel {
         }
         // 郊狼：根据广播名自动识别 V2/V3
         if (BleScanner.COYOTE_V2_NAME.equals(name)) {
-            return new CoyoteV2Adapter(deviceId);
+            return new DGLabV2Adapter(deviceId);
         }
-        // 默认郊狼 V3
-        return new CoyoteV3Adapter(deviceId);
+        // 默认 DG-LAB V3
+        return new DGLabV3Adapter(deviceId);
     }
 
     private List<String> prefixesFor(String deviceType) {
-        if (TYPE_COYOTE_V3.equals(deviceType)) {
+        if (TYPE_DGLAB_V3.equals(deviceType)) {
             // 郊狼类型同时扫描 V2("D-LAB ESTIM01") 和 V3("47L121") 前缀
             return BleScanner.COYOTE_ALL_PREFIXES;
         }

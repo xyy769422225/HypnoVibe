@@ -1,12 +1,12 @@
-package com.hypno.hypnovibe.infrastructure.ble.adapter.coyote;
+package com.hypno.hypnovibe.infrastructure.ble.adapter.dglab;
 
 /**
- * 郊狼波形帧数据模型。
+ * DG-LAB 波形帧数据模型。
  * <p>
  * 表示单个波形采样点，包含频率和强度两个维度。
- * package-private，仅郊狼子包内部使用。
+ * package-private，仅 dglab 子包内部使用。
  */
-final class CoyoteWaveFrame {
+final class DGLabWaveFrame {
 
     /** 帧内相对时间(ms) */
     final int timeMs;
@@ -17,15 +17,15 @@ final class CoyoteWaveFrame {
     /** 波形强度，V3:0-100, V2:0-20(映射到Z值) */
     final int strength;
 
-    CoyoteWaveFrame(int timeMs, int frequency, int strength) {
+    DGLabWaveFrame(int timeMs, int frequency, int strength) {
         this.timeMs = timeMs;
         this.frequency = frequency;
         this.strength = strength;
     }
 
     /** 创建频率/强度均为0的静默帧 */
-    static CoyoteWaveFrame silent(int timeMs) {
-        return new CoyoteWaveFrame(timeMs, 0, 0);
+    static DGLabWaveFrame silent(int timeMs) {
+        return new DGLabWaveFrame(timeMs, 0, 0);
     }
 
     @Override

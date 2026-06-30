@@ -19,8 +19,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavController
-import com.hypno.hypnovibe.app.viewmodel.CoyoteTestVM
-import com.hypno.hypnovibe.infrastructure.ble.adapter.coyote.CoyoteController
+import com.hypno.hypnovibe.app.viewmodel.DGLabTestVM
+import com.hypno.hypnovibe.infrastructure.ble.adapter.dglab.DGLabController
 import com.hypno.hypnovibe.ui.component.*
 import com.hypno.hypnovibe.ui.theme.*
 import kotlinx.coroutines.Dispatchers
@@ -29,14 +29,14 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
- * 郊狼强度测试面板。
+ * DG-LAB 强度测试面板。
  * A/B 双通道独立调节，按住按钮连续增减（每秒最多+2），安全开关一键归零。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CoyoteTestScreen(deviceId: String, navController: NavController) {
+fun DGLabTestScreen(deviceId: String, navController: NavController) {
     val deviceVm = rememberDeviceManagerVM()
-    val testVm: CoyoteTestVM = viewModel()
+    val testVm: DGLabTestVM = viewModel()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -48,11 +48,10 @@ fun CoyoteTestScreen(deviceId: String, navController: NavController) {
     val isConnected by testVm.getIsConnected().collectAsState()
     val deviceName by testVm.getDeviceName().collectAsState()
 
-    // 进入页面时从 DeviceManagerVM 获取 adapter
     LaunchedEffect(deviceId) {
         val connected = deviceVm.findDevice(deviceId)
-        if (connected != null && connected.adapter is CoyoteController) {
-            testVm.setController(connected.adapter as CoyoteController, connected.name)
+        if (connected != null && connected.adapter is DGLabController) {
+            testVm.setController(connected.adapter as DGLabController, connected.name)
         } else {
             Toast.makeText(context, "设备未找到", Toast.LENGTH_SHORT).show()
             navController.popBackStack()
@@ -62,7 +61,7 @@ fun CoyoteTestScreen(deviceId: String, navController: NavController) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(deviceName ?: "郊狼测试", color = GoldAncient) },
+                title = { Text(deviceName ?: "DG-LAB 测试", color = GoldAncient) },
                 navigationIcon = {
                     IconButton(onClick = { navController.popBackStack() }) {
                         Icon(Icons.Filled.ArrowBack, "返回", tint = SilverGray)
@@ -80,7 +79,6 @@ fun CoyoteTestScreen(deviceId: String, navController: NavController) {
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // 连接状态
             if (!isConnected) {
                 StoneCard {
                     Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
@@ -89,7 +87,6 @@ fun CoyoteTestScreen(deviceId: String, navController: NavController) {
                 }
             }
 
-            // A 通道
             ChannelControl(
                 title = "⚡ A 通道",
                 targetStrength = targetA,
@@ -99,7 +96,6 @@ fun CoyoteTestScreen(deviceId: String, navController: NavController) {
                 enabled = isConnected && !safetyOn
             )
 
-            // B 通道
             ChannelControl(
                 title = "⚡ B 通道",
                 targetStrength = targetB,
@@ -111,7 +107,6 @@ fun CoyoteTestScreen(deviceId: String, navController: NavController) {
 
             GothicDivider()
 
-            // 安全开关
             DungeonButton(
                 text = if (safetyOn) "⚡ 解锁强度" else "🔴 安全停止",
                 variant = if (safetyOn) ButtonVariant.SECONDARY else ButtonVariant.DANGER,
@@ -127,7 +122,6 @@ fun CoyoteTestScreen(deviceId: String, navController: NavController) {
                 modifier = Modifier.fillMaxWidth()
             )
 
-            // 提示
             Text(
                 "⚠ 按住按钮不松将连续增加，每秒最多+2强度",
                 color = DarkGray,
@@ -137,10 +131,6 @@ fun CoyoteTestScreen(deviceId: String, navController: NavController) {
     }
 }
 
-/**
- * 单通道控制组件。
- * 包含标题、强度进度条、设备回报、[-]和[+]按钮（按住连续调节）。
- */
 @Composable
 private fun ChannelControl(
     title: String,
@@ -159,7 +149,6 @@ private fun ChannelControl(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // [-] 按钮（按住连续减少）
                 HoldButton(
                     text = "－",
                     enabled = enabled,
@@ -169,7 +158,6 @@ private fun ChannelControl(
 
                 Spacer(Modifier.width(8.dp))
 
-                // 进度条 + 数值
                 Column(modifier = Modifier.weight(1f)) {
                     LinearProgressIndicator(
                         progress = targetStrength / 200f,
@@ -192,7 +180,6 @@ private fun ChannelControl(
 
                 Spacer(Modifier.width(8.dp))
 
-                // [+] 按钮（按住连续增加）
                 HoldButton(
                     text = "＋",
                     enabled = enabled,
@@ -205,10 +192,6 @@ private fun ChannelControl(
     }
 }
 
-/**
- * 按住可连续触发的按钮。
- * 按下立即响应一次，500ms 后开始连续触发，每 500ms 一次（每秒最多2次）。
- */
 @Composable
 private fun HoldButton(
     text: String,
@@ -234,9 +217,7 @@ private fun HoldButton(
             detectTapGestures(
                 onPress = {
                     pressed = true
-                    // 立即响应一次
                     onChange()
-                    // 延迟后启动连续触发
                     val job = scope.launch(Dispatchers.Default) {
                         delay(500)
                         while (isActive && pressed) {

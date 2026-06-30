@@ -1,457 +1,406 @@
 package com.hypno.hypnovibe.infrastructure.ble.adapter.coyote;
 
+import android.annotation.SuppressLint;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
 import android.bluetooth.BluetoothGattCallback;
 import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattDescriptor;
-import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothProfile;
 import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 
-import com.hypno.hypnovibe.infrastructure.ble.adapter.AdapterStatus;
-import com.hypno.hypnovibe.infrastructure.ble.adapter.DeviceProtocolAdapter;
+import com.hypno.hypnovibe.domain.AdapterStatus;
+import com.hypno.hypnovibe.domain.DeviceProtocolAdapter;
 
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * 郊狼 V3 设备协议适配器。
- * <p>
- * 完整封装 V3 的 BLE 通信协议：100ms定时器、B0/BF/B1编解码、序列号流控、自动重连。
- * 对外实现 {@link DeviceProtocolAdapter} 接口，是郊狼子包的两个 public 入口之一。
+ * 郊狼 V3 设备适配器。
  *
- * <h3>内部架构</h3>
- * <pre>
- * connect() → GATT连接 → 发现服务 → 绑定Notify → 写BF → 启动100ms定时器
- * 100ms定时器 → 取最新快照 → 拆槽位 → 构造B0 → writeCharacteristic
- * disconnect → B1序列号匹配 → 更新本地强度 → 解除流控等待
- * 断连 → 静默重连(最多3次) → onFatalError
- * </pre>
+ * 完整实现 DeviceProtocolAdapter 接口，Phase 4 中 connect/disconnect/release/emergencyStop
+ * 完整可用，updateSnapshot/validateSegmentData 留空（Phase 5 填充）。
+ *
+ * 测试面板通过 setManualStrength 手动设置目标强度，由内部 100ms 定时器统一发送 B0。
  */
 public class CoyoteV3Adapter implements DeviceProtocolAdapter {
 
-    private static final UUID UUID_180C = UUID.fromString(CoyoteConstants.SERVICE_V3);
-    private static final UUID UUID_150A = UUID.fromString(CoyoteConstants.CHAR_WRITE_V3);
-    private static final UUID UUID_150B = UUID.fromString(CoyoteConstants.CHAR_NOTIFY_V3);
-    private static final UUID UUID_CLIENT_CHAR_CONFIG =
+    private static final String TAG = "CoyoteV3Adapter";
+    private static final String DEVICE_TYPE = "coyote_v3";
+
+    // GATT UUID
+    private static final UUID SERVICE_UUID =
+            UUID.fromString("0000180c-0000-1000-8000-00805f9b34fb");
+    private static final UUID CHAR_WRITE =
+            UUID.fromString("0000150a-0000-1000-8000-00805f9b34fb");
+    private static final UUID CHAR_NOTIFY =
+            UUID.fromString("0000150b-0000-1000-8000-00805f9b34fb");
+    private static final UUID DESCRIPTOR_UUID =
             UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
 
-    private final String deviceId;
-    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private static final long B1_TIMEOUT_MS = 500;
+    private static final long TIMER_INTERVAL_MS = 100;
 
-    // BLE
+    // ===== 标识 =====
+    private final String deviceId;
+
+    // ===== BLE =====
+    private Context context;
     private BluetoothGatt gatt;
     private BluetoothGattCharacteristic writeChar;
     private BluetoothGattCharacteristic notifyChar;
     private AdapterStatus statusCallback;
 
-    // 设备状态
-    private int strengthA = 0;
-    private int strengthB = 0;
-    private volatile boolean isConnected = false;
-
-    // 流控
-    private int pendingSeqNo = 0;
-    private boolean waitingConfirm = false;
-    private int seqNoCounter = 0;
-    // 累积的强度变化（等待发送，用于流控期间暂存）
-    private int accumulatedDeltaA = 0;
-    private int accumulatedDeltaB = 0;
-
-    // 定时器
+    // ===== 定时器 =====
     private ScheduledExecutorService timer;
-    private ScheduledFuture<?> timerFuture;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
-    // 最新快照缓存 (volatile: Audio线程写, BLE线程读)
-    private volatile byte[][] latestSnapshotChannels = null;
-    private volatile long[] latestSnapshotOffsets = null;
+    // ===== 强度状态 =====
+    private volatile int targetStrengthA = 0;
+    private volatile int targetStrengthB = 0;
+    private volatile int deviceStrengthA = 0;
+    private volatile int deviceStrengthB = 0;
+    private volatile boolean safetyOn = true;
 
-    // 重连
-    private String lastAddress;
-    private Context lastContext;
-    private int retryCount = 0;
-    private static final int MAX_RETRIES = 3;
-    private static final long[] RETRY_DELAYS = CoyoteConstants.RETRY_DELAYS_MS;
+    // ===== 流控状态 =====
+    private final AtomicInteger pendingSeqNo = new AtomicInteger(0);
+    private volatile boolean waitingConfirm = false;
+    private long lastB1Time = 0;
 
-    public CoyoteV3Adapter() {
-        this.deviceId = "coyote_v3_" + System.nanoTime();
+    // ===== 波形（Phase 4 固定基础波形） =====
+    private int[] freqA = CoyoteB0Builder.basicFreq();
+    private int[] waveA = CoyoteB0Builder.basicWaveStrength();
+    private int[] freqB = CoyoteB0Builder.basicFreq();
+    private int[] waveB = CoyoteB0Builder.basicWaveStrength();
+
+    // ===== 测试回调 =====
+    private CoyoteListener coyoteListener;
+    private volatile boolean connected = false;
+    private volatile boolean released = false;
+
+    /** 测试面板回调接口 */
+    public interface CoyoteListener {
+        void onStrengthFeedback(int a, int b);
+        void onConnected();
+        void onDisconnected();
     }
 
-    // ===== 标识 =====
-
-    @Override
-    public String getDeviceType() {
-        return CoyoteConstants.DEVICE_TYPE_V3;
+    public CoyoteV3Adapter(String deviceId) {
+        this.deviceId = deviceId;
     }
 
-    @Override
-    public String getDeviceId() {
-        return deviceId;
+    public void setCoyoteListener(CoyoteListener listener) {
+        this.coyoteListener = listener;
     }
 
-    // ===== 生命周期 =====
+    // ══════════════════════════════════════════════════════
+    //  DeviceProtocolAdapter 实现
+    // ══════════════════════════════════════════════════════
 
+    @Override public String getDeviceType() { return DEVICE_TYPE; }
+    @Override public String getDeviceId() { return deviceId; }
+
+    @SuppressLint("MissingPermission")
     @Override
-    public void connect(Context context, String address, AdapterStatus status) {
-        this.lastContext = context.getApplicationContext();
-        this.lastAddress = address;
+    public void connect(Context ctx, String address, AdapterStatus status) {
+        this.context = ctx.getApplicationContext();
         this.statusCallback = status;
-        this.retryCount = 0;
+        notifyState(AdapterStatus.State.CONNECTING, "正在连接...");
 
-        notifyStatus(AdapterStatus.State.CONNECTING, "开始连接: " + address);
-
-        try {
-            BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
-            if (adapter == null) {
-                notifyStatus(AdapterStatus.State.ERROR, "设备不支持蓝牙");
-                return;
-            }
-            BluetoothDevice device = adapter.getRemoteDevice(address);
-            gatt = device.connectGatt(lastContext, false, gattCallback);
-        } catch (SecurityException e) {
-            notifyStatus(AdapterStatus.State.ERROR, "缺少蓝牙权限: " + e.getMessage());
-        } catch (Exception e) {
-            notifyStatus(AdapterStatus.State.ERROR, "连接异常: " + e.getMessage());
+        BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+        if (adapter == null) {
+            notifyState(AdapterStatus.State.ERROR, "BluetoothAdapter 不可用");
+            return;
         }
+        BluetoothDevice device = adapter.getRemoteDevice(address);
+        gatt = device.connectGatt(ctx, false, gattCallback);
     }
 
+    @SuppressLint("MissingPermission")
     @Override
     public void disconnect() {
-        retryCount = MAX_RETRIES; // 主动断开，不重连
         stopTimer();
+        connected = false;
         if (gatt != null) {
             try {
                 gatt.disconnect();
-            } catch (Exception ignored) {}
-        }
-    }
-
-    @Override
-    public void release() {
-        disconnect();
-        if (gatt != null) {
-            try {
                 gatt.close();
             } catch (Exception ignored) {}
             gatt = null;
         }
         writeChar = null;
         notifyChar = null;
-        latestSnapshotChannels = null;
-        latestSnapshotOffsets = null;
+        safetyOn = true;
+        notifyState(AdapterStatus.State.DISCONNECTED, "已断开");
+        if (coyoteListener != null) coyoteListener.onDisconnected();
     }
 
-    // ===== 数据通道 =====
+    @Override
+    public void release() {
+        released = true;
+        disconnect();
+    }
 
     @Override
-    public void updateSnapshot(Map<String, byte[]> channelData, Map<String, Long> offsets) {
-        // 留空实现：等待 protobuf 基础设施后填充
-        // 当前存储原始引用，子包内部的波形拆分需要 protobuf 反序列化
+    public void updateSnapshot(Map<String, byte[]> channelData,
+                               Map<String, Long> offsetsInSegment) {
+        // Phase 5 填充：反序列化 protobuf，更新 freqA/waveA/freqB/waveB
     }
 
     @Override
     public void flush() {
-        // 清空累积缓冲
-        accumulatedDeltaA = 0;
-        accumulatedDeltaB = 0;
-        // 如果已连接，立即触发一次 B0 发送
-        if (isConnected && writeChar != null && gatt != null) {
-            sendWaveformOnly();
-        }
+        // Phase 5 填充：清空波形缓冲
     }
 
     @Override
     public void emergencyStop() {
-        if (isConnected && writeChar != null && gatt != null) {
-            byte[] cmd = CoyoteV3Protocol.buildEmergencyStop();
-            try {
-                writeChar.setValue(cmd);
-                gatt.writeCharacteristic(writeChar);
-            } catch (SecurityException ignored) {}
-        }
-        strengthA = 0;
-        strengthB = 0;
-        pendingSeqNo = 0;
-        waitingConfirm = false;
+        targetStrengthA = 0;
+        targetStrengthB = 0;
+        safetyOn = true;
+        // 立即发送归零 B0，绕开定时器
+        int seq = nextSeqNo();
+        byte[] cmd = CoyoteB0Builder.buildB0(
+            true, seq,
+            CoyoteB0Builder.MODE_ABSOLUTE, CoyoteB0Builder.MODE_ABSOLUTE,
+            0, 0,
+            freqA, waveA, freqB, waveB);
+        writeCharacteristic(cmd);
+        waitingConfirm = true;
+        pendingSeqNo.set(seq);
     }
 
     @Override
-    public boolean validateSegmentData(byte[] data) {
-        // 留空实现：等待 protobuf 基础设施后填充
-        return false;
+    public boolean validateSegmentData(byte[] protobufBytes) {
+        return false; // Phase 5 填充
     }
 
-    // ===== 内部: BLE GATT 回调 =====
+    // ══════════════════════════════════════════════════════
+    //  测试面板专用 API
+    // ══════════════════════════════════════════════════════
 
+    /** 手动设置目标强度（0-200），由 100ms 定时器统一发送 */
+    public void setManualStrength(int a, int b) {
+        targetStrengthA = clamp(a, 0, 200);
+        targetStrengthB = clamp(b, 0, 200);
+    }
+
+    /** 获取设备回报的实际强度（B1 更新） */
+    public int getDeviceStrengthA() { return deviceStrengthA; }
+    public int getDeviceStrengthB() { return deviceStrengthB; }
+
+    public boolean isSafetyOn() { return safetyOn; }
+
+    /** 解锁安全开关，允许定时器发送强度 */
+    public void unlockSafety() {
+        safetyOn = false;
+    }
+
+    public boolean isConnected() { return connected && !released; }
+
+    // ══════════════════════════════════════════════════════
+    //  GATT 回调
+    // ══════════════════════════════════════════════════════
+
+    @SuppressLint("MissingPermission")
     private final BluetoothGattCallback gattCallback = new BluetoothGattCallback() {
-
         @Override
-        public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
+        public void onConnectionStateChange(BluetoothGatt g, int status, int newState) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                isConnected = true;
-                retryCount = 0;
-                notifyStatus(AdapterStatus.State.CONNECTED, "GATT 已连接, 发现服务中...");
-                try {
-                    gatt.discoverServices();
-                } catch (SecurityException e) {
-                    notifyStatus(AdapterStatus.State.ERROR, "发现服务失败: " + e.getMessage());
-                }
+                Log.d(TAG, "GATT connected, discovering services");
+                g.discoverServices();
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                isConnected = false;
+                Log.w(TAG, "GATT disconnected (status=" + status + ")");
+                connected = false;
                 stopTimer();
-                if (retryCount < MAX_RETRIES) {
-                    notifyStatus(AdapterStatus.State.RETRYING,
-                            "连接断开, 第" + (retryCount + 1) + "次重试...");
-                    scheduleRetry();
-                } else {
-                    notifyStatus(AdapterStatus.State.DISCONNECTED, "连接已断开");
-                }
+                safetyOn = true;
+                mainHandler.post(() -> {
+                    notifyState(AdapterStatus.State.DISCONNECTED, "设备断开");
+                    if (coyoteListener != null) coyoteListener.onDisconnected();
+                });
             }
         }
 
         @Override
-        public void onServicesDiscovered(BluetoothGatt gatt, int status) {
+        public void onServicesDiscovered(BluetoothGatt g, int status) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                notifyStatus(AdapterStatus.State.ERROR, "服务发现失败: " + status);
+                Log.e(TAG, "onServicesDiscovered failed: " + status);
+                notifyState(AdapterStatus.State.ERROR, "服务发现失败");
                 return;
             }
-
-            BluetoothGattService service = gatt.getService(UUID_180C);
-            if (service == null) {
-                notifyStatus(AdapterStatus.State.ERROR, "未找到主服务 0x180C");
-                return;
-            }
-
-            writeChar = service.getCharacteristic(UUID_150A);
-            notifyChar = service.getCharacteristic(UUID_150B);
-
+            writeChar = g.getService(SERVICE_UUID).getCharacteristic(CHAR_WRITE);
+            notifyChar = g.getService(SERVICE_UUID).getCharacteristic(CHAR_NOTIFY);
             if (writeChar == null || notifyChar == null) {
-                notifyStatus(AdapterStatus.State.ERROR, "未找到 0x150A 或 0x150B 特性");
+                notifyState(AdapterStatus.State.ERROR, "特征值未找到");
                 return;
             }
 
             // 绑定 Notify
-            try {
-                gatt.setCharacteristicNotification(notifyChar, true);
-                BluetoothGattDescriptor descriptor = notifyChar.getDescriptor(UUID_CLIENT_CHAR_CONFIG);
-                if (descriptor != null) {
-                    descriptor.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
-                    gatt.writeDescriptor(descriptor);
-                }
-            } catch (SecurityException e) {
-                notifyStatus(AdapterStatus.State.ERROR, "绑定 Notify 失败: " + e.getMessage());
-                return;
+            g.setCharacteristicNotification(notifyChar, true);
+            BluetoothGattDescriptor desc = notifyChar.getDescriptor(DESCRIPTOR_UUID);
+            if (desc != null) {
+                desc.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+                g.writeDescriptor(desc);
             }
 
-            // 写入 BF 默认值（必须先于 B0 循环）
-            byte[] bfCmd = CoyoteV3Protocol.buildDefaultBF();
-            try {
-                writeChar.setValue(bfCmd);
-                gatt.writeCharacteristic(writeChar);
-            } catch (SecurityException e) {
-                notifyStatus(AdapterStatus.State.ERROR, "写入 BF 失败: " + e.getMessage());
-                return;
-            }
-
-            // BF 写入后延迟一点再启动 B0 循环
+            // 写入 BF 默认值（延迟 200ms 确保 descriptor 写入完成）
             mainHandler.postDelayed(() -> {
+                if (released || gatt == null) return;
+                byte[] bf = CoyoteB0Builder.buildDefaultBF();
+                writeChar.setValue(bf);
+                gatt.writeCharacteristic(writeChar);
+
+                // 启动 100ms 定时器
                 startTimer();
-                notifyStatus(AdapterStatus.State.CONNECTED, "已连接: " + lastAddress);
-            }, 100);
+                connected = true;
+                notifyState(AdapterStatus.State.CONNECTED, "连接成功");
+                if (coyoteListener != null) coyoteListener.onConnected();
+            }, 200);
         }
 
         @Override
-        public void onCharacteristicChanged(BluetoothGatt gatt,
+        public void onCharacteristicChanged(BluetoothGatt g,
                                             BluetoothGattCharacteristic characteristic) {
-            if (!CoyoteConstants.CHAR_NOTIFY_V3.equals(characteristic.getUuid().toString())) {
-                return;
-            }
-
             byte[] data = characteristic.getValue();
-            if (data == null || data.length < CoyoteConstants.B1_LENGTH) {
-                return;
-            }
-
-            // 检查 B1 消息头
-            if ((data[0] & 0xFF) != (CoyoteConstants.HEAD_B1 & 0xFF)) {
-                return;
-            }
-
-            CoyoteB1Message msg = CoyoteV3Protocol.parseB1(data);
-            if (msg != null) {
-                strengthA = msg.strengthA;
-                strengthB = msg.strengthB;
-
-                // 序列号匹配 → 解除流控
-                if (msg.seqNo != 0 && msg.seqNo == pendingSeqNo) {
-                    waitingConfirm = false;
-                    pendingSeqNo = 0;
-                }
+            if (data != null && data.length >= 4 && data[0] == (byte) 0xB1) {
+                onB1Received(data);
             }
         }
     };
 
-    // ===== 内部: 100ms 定时器 =====
+    // ══════════════════════════════════════════════════════
+    //  B1 反馈处理
+    // ══════════════════════════════════════════════════════
+
+    private void onB1Received(byte[] data) {
+        int seqNo = data[1] & 0xFF;
+        int a = data[2] & 0xFF;
+        int b = data[3] & 0xFF;
+
+        deviceStrengthA = a;
+        deviceStrengthB = b;
+        lastB1Time = System.currentTimeMillis();
+
+        if (seqNo == pendingSeqNo.get() && seqNo != 0) {
+            waitingConfirm = false;
+            pendingSeqNo.set(0);
+        }
+
+        if (coyoteListener != null) {
+            coyoteListener.onStrengthFeedback(a, b);
+        }
+    }
+
+    // ══════════════════════════════════════════════════════
+    //  100ms 定时器
+    // ══════════════════════════════════════════════════════
 
     private void startTimer() {
-        stopTimer();
-        timer = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "coyote_v3_timer");
-            t.setDaemon(true);
-            return t;
-        });
-        timerFuture = timer.scheduleAtFixedRate(
-                this::onTimerTick,
-                0,
-                CoyoteConstants.OUTPUT_WINDOW_MS,
-                TimeUnit.MILLISECONDS
-        );
+        if (timer != null) return;
+        timer = Executors.newSingleThreadScheduledExecutor();
+        timer.scheduleAtFixedRate(() -> {
+            try {
+                onTimerTick();
+            } catch (Exception e) {
+                Log.e(TAG, "timer tick error", e);
+            }
+        }, 0, TIMER_INTERVAL_MS, TimeUnit.MILLISECONDS);
     }
 
     private void stopTimer() {
-        if (timerFuture != null) {
-            timerFuture.cancel(false);
-            timerFuture = null;
-        }
         if (timer != null) {
-            timer.shutdown();
+            timer.shutdownNow();
             timer = null;
         }
     }
 
-    /**
-     * 100ms 定时器回调。
-     * <p>
-     * 从最新快照中取数据，拆分为4个25ms槽位，构造B0指令发送。
-     * 当前快照数据为空时发送静默帧（仅维持100ms周期）。
-     */
     private void onTimerTick() {
-        if (!isConnected || gatt == null || writeChar == null) {
+        if (released || !connected || gatt == null || writeChar == null) return;
+
+        // B1 超时检查
+        if (waitingConfirm && System.currentTimeMillis() - lastB1Time > B1_TIMEOUT_MS) {
+            waitingConfirm = false;
+            pendingSeqNo.set(0);
+        }
+
+        if (safetyOn) {
+            // 安全模式：仅发波形，强度不变
+            sendB0StrengthUnchanged();
             return;
         }
 
-        // 当前阶段：快照数据为空，发送静默波形维持100ms周期
-        byte[] cmd;
         if (waitingConfirm) {
-            // 流控等待中：发送"仅波形、强度不变"的 B0
-            cmd = buildTimerB0(false);
-            pendingSeqNo = 0;
-        } else if (accumulatedDeltaA != 0 || accumulatedDeltaB != 0) {
-            // 有累积的强度变化，发送强度修改
-            cmd = buildTimerB0(true);
-            pendingSeqNo = nextSeqNo();
+            sendB0StrengthUnchanged();
+            return;
+        }
+
+        boolean needChangeA = targetStrengthA != deviceStrengthA;
+        boolean needChangeB = targetStrengthB != deviceStrengthB;
+
+        if (needChangeA || needChangeB) {
+            int seq = nextSeqNo();
+            pendingSeqNo.set(seq);
             waitingConfirm = true;
-            accumulatedDeltaA = 0;
-            accumulatedDeltaB = 0;
+
+            int modeA = needChangeA ? CoyoteB0Builder.MODE_ABSOLUTE : CoyoteB0Builder.MODE_UNCHANGED;
+            int modeB = needChangeB ? CoyoteB0Builder.MODE_ABSOLUTE : CoyoteB0Builder.MODE_UNCHANGED;
+
+            byte[] cmd = CoyoteB0Builder.buildB0(
+                true, seq, modeA, modeB,
+                targetStrengthA, targetStrengthB,
+                freqA, waveA, freqB, waveB);
+            writeCharacteristic(cmd);
         } else {
-            // 纯波形输出
-            cmd = buildTimerB0(false);
-        }
-
-        long startTime = System.currentTimeMillis();
-        boolean success = false;
-        try {
-            writeChar.setValue(cmd);
-            success = gatt.writeCharacteristic(writeChar);
-        } catch (SecurityException ignored) {
-        }
-
-        long latency = System.currentTimeMillis() - startTime;
-        if (statusCallback != null) {
-            statusCallback.onCycleStats(deviceId, latency, success);
+            sendB0StrengthUnchanged();
         }
     }
 
-    private byte[] buildTimerB0(boolean changeStrength) {
-        int[] freqA = {10, 10, 10, 10};
-        int[] waveA = {0, 0, 0, 0};
-        int[] freqB = {10, 10, 10, 10};
-        int[] waveB = {0, 0, 0, 0};
+    private void sendB0StrengthUnchanged() {
+        byte[] cmd = CoyoteB0Builder.buildB0(
+            false, 0,
+            CoyoteB0Builder.MODE_UNCHANGED, CoyoteB0Builder.MODE_UNCHANGED,
+            0, 0,
+            freqA, waveA, freqB, waveB);
+        writeCharacteristic(cmd);
+    }
 
-        if (changeStrength) {
-            int absDeltaA = Math.abs(accumulatedDeltaA);
-            int absDeltaB = Math.abs(accumulatedDeltaB);
-            int modeA = accumulatedDeltaA > 0 ? CoyoteConstants.MODE_INCREMENT :
-                    (accumulatedDeltaA < 0 ? CoyoteConstants.MODE_DECREMENT : CoyoteConstants.MODE_UNCHANGED);
-            int modeB = accumulatedDeltaB > 0 ? CoyoteConstants.MODE_INCREMENT :
-                    (accumulatedDeltaB < 0 ? CoyoteConstants.MODE_DECREMENT : CoyoteConstants.MODE_UNCHANGED);
+    // ══════════════════════════════════════════════════════
+    //  工具方法
+    // ══════════════════════════════════════════════════════
 
-            return CoyoteV3Protocol.buildB0(
-                    nextSeqNoPending(), modeA, modeB,
-                    absDeltaA, absDeltaB,
-                    freqA, waveA, freqB, waveB
-            );
+    @SuppressLint("MissingPermission")
+    private void writeCharacteristic(byte[] value) {
+        if (gatt == null || writeChar == null) return;
+        writeChar.setValue(value);
+        boolean ok = gatt.writeCharacteristic(writeChar);
+        if (!ok) {
+            Log.w(TAG, "writeCharacteristic failed");
+            if (statusCallback != null) {
+                statusCallback.onCycleStats(deviceId, 0, false);
+            }
         }
-        return CoyoteV3Protocol.buildB0WaveformOnly(freqA, waveA, freqB, waveB);
     }
-
-    /** 发送仅波形数据（不修改强度）的 B0 */
-    private void sendWaveformOnly() {
-        int[] freqA = {10, 10, 10, 10};
-        int[] waveA = {0, 0, 0, 0};
-        int[] freqB = {10, 10, 10, 10};
-        int[] waveB = {0, 0, 0, 0};
-        byte[] cmd = CoyoteV3Protocol.buildB0WaveformOnly(freqA, waveA, freqB, waveB);
-        try {
-            writeChar.setValue(cmd);
-            gatt.writeCharacteristic(writeChar);
-        } catch (SecurityException ignored) {}
-    }
-
-    // ===== 内部: 流控 =====
 
     private int nextSeqNo() {
-        seqNoCounter++;
-        if (seqNoCounter > CoyoteConstants.SEQ_NO_MAX) {
-            seqNoCounter = CoyoteConstants.SEQ_NO_MIN;
+        int s = pendingSeqNo.get();
+        if (s == 0) return 1;
+        return (s % 15) + 1;
+    }
+
+    private void notifyState(AdapterStatus.State state, String detail) {
+        if (statusCallback != null) {
+            statusCallback.onStateChanged(state, deviceId, detail);
         }
-        return seqNoCounter;
     }
 
-    private int nextSeqNoPending() {
-        int seq = nextSeqNo();
-        pendingSeqNo = seq;
-        return seq;
-    }
-
-    // ===== 内部: 重连 =====
-
-    private void scheduleRetry() {
-        if (retryCount >= MAX_RETRIES) {
-            if (statusCallback != null) {
-                statusCallback.onFatalError(deviceId,
-                        "重连失败，已重试" + MAX_RETRIES + "次");
-            }
-            return;
-        }
-
-        long delay = RETRY_DELAYS[retryCount];
-        retryCount++;
-
-        mainHandler.postDelayed(() -> {
-            if (lastAddress != null && lastContext != null && !isConnected) {
-                connect(lastContext, lastAddress, statusCallback);
-            }
-        }, delay);
-    }
-
-    // ===== 内部: 状态通知 =====
-
-    private void notifyStatus(AdapterStatus.State state, String detail) {
-        mainHandler.post(() -> {
-            if (statusCallback != null) {
-                statusCallback.onStateChanged(state, deviceId, detail);
-            }
-        });
+    private static int clamp(int v, int min, int max) {
+        return v < min ? min : (v > max ? max : v);
     }
 }

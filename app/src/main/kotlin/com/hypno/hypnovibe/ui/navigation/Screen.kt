@@ -15,4 +15,11 @@ sealed class Screen(val route: String, val label: String, val icon: ImageVector)
     object ConfigList : Screen("config_list", "", Icons.Filled.List)
     object ConfigEditor : Screen("config_editor/{configId}", "", Icons.Filled.Edit)
     object Waveform : Screen("waveform", "", Icons.Filled.GraphicEq)
+    object CoyoteTest : Screen("coyote_test/{deviceId}", "", Icons.Filled.Bolt)
+
+    /** 设备类型选择（添加设备第一步） */
+    object DeviceTypePicker : Screen("device_type_picker", "", Icons.Filled.Add)
+
+    /** 设备连接（添加设备第二步：扫描并连接某类型设备） */
+    object DeviceConnect : Screen("device_connect/{deviceType}", "", Icons.Filled.BluetoothSearching)
 }

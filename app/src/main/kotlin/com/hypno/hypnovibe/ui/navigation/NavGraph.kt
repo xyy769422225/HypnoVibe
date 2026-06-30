@@ -8,7 +8,10 @@ import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
 import com.hypno.hypnovibe.ui.screen.config.ConfigEditorScreen
 import com.hypno.hypnovibe.ui.screen.config.ConfigListScreen
+import com.hypno.hypnovibe.ui.screen.device.CoyoteTestScreen
+import com.hypno.hypnovibe.ui.screen.device.DeviceConnectScreen
 import com.hypno.hypnovibe.ui.screen.device.DeviceScreen
+import com.hypno.hypnovibe.ui.screen.device.DeviceTypePickerScreen
 import com.hypno.hypnovibe.ui.screen.editor.TimelineEditorScreen
 import com.hypno.hypnovibe.ui.screen.home.HomeScreen
 import com.hypno.hypnovibe.ui.screen.playlist.ChannelMappingScreen
@@ -39,5 +42,21 @@ fun NavGraph(navController: NavHostController) {
             ConfigEditorScreen(entry.arguments?.getString("configId") ?: "new")
         }
         composable(Screen.Waveform.route) { WaveformScreen() }
+        composable(
+            route = Screen.CoyoteTest.route,
+            arguments = listOf(navArgument("deviceId") {})
+        ) { entry ->
+            CoyoteTestScreen(entry.arguments?.getString("deviceId") ?: "", navController)
+        }
+
+        // 添加设备：第一步 选择设备类型
+        composable(Screen.DeviceTypePicker.route) { DeviceTypePickerScreen(navController) }
+        // 添加设备：第二步 扫描并连接
+        composable(
+            route = Screen.DeviceConnect.route,
+            arguments = listOf(navArgument("deviceType") { })
+        ) { entry ->
+            DeviceConnectScreen(entry.arguments?.getString("deviceType") ?: "", navController)
+        }
     }
 }

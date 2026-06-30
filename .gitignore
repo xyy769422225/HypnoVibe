@@ -16,7 +16,11 @@ local.properties
 
 # Signing
 *.jks
+*.keystore
 keystore.properties
 
 # AI temp data
 ai_temp_data/
+
+# Release APK output
+app/release/HypnoVibe.apk

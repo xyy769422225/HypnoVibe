@@ -116,6 +116,7 @@ public class DeviceManagerVM extends AndroidViewModel {
     public DeviceManagerVM(Application app) {
         super(app);
         bleScanner = new BleScanner();
+        bleScanner.setAppContext(app);  // 注入 Context 用于检测定位服务
         devicePrefs = new DevicePrefs(app);
         savedDevices = StateFlowKt.MutableStateFlow(devicePrefs.loadAll());
 
@@ -188,6 +189,7 @@ public class DeviceManagerVM extends AndroidViewModel {
         }
         String deviceId = UUID.randomUUID().toString();
         DeviceProtocolAdapter adapter = createAdapter(deviceType, name, deviceId);
+        if (adapter == null) return;  // DFU 等不支持的情况，createAdapter 已设置 errorMsg
         AdapterStatus status = buildStatus(mac);
 
         ConnectedDevice device = new ConnectedDevice(deviceId, name, mac, adapter,
@@ -207,7 +209,12 @@ public class DeviceManagerVM extends AndroidViewModel {
         savedDevices.setValue(devicePrefs.loadAll());
         rebuildList();
 
-        adapter.connect(getApplication(), mac, status);
+        // 对齐官方 delayDo(1000)：扫描到设备后延迟 1 秒再连接
+        mainHandler.postDelayed(() -> {
+            if (connectedMap.containsKey(mac)) {
+                adapter.connect(getApplication(), mac, status);
+            }
+        }, 1000);
     }
 
     /** 重新连接一个已保存但未连接的设备 */
@@ -342,21 +349,22 @@ public class DeviceManagerVM extends AndroidViewModel {
         if (TYPE_LOVE_SPOUSE.equals(deviceType)) {
             return new LoveSpouseAdapter(deviceId);
         }
-        // 郊狼：根据广播名自动识别 V2/V3
+        // DFU 固件升级模式设备不创建 adapter
+        if (name != null && (BleScanner.DFU_TAG.equals(name) || name.startsWith(BleScanner.DFU_PREFIX))) {
+            errorMsg.setValue("设备处于固件升级模式，请通过官方APP退出DFU");
+            return null;
+        }
+        // V2: 精确匹配广播名
         if (BleScanner.COYOTE_V2_NAME.equals(name)) {
             return new DGLabV2Adapter(deviceId);
         }
-        // 默认 DG-LAB V3
+        // V3: 精确匹配广播名（默认）
         return new DGLabV3Adapter(deviceId);
     }
 
     private List<String> prefixesFor(String deviceType) {
-        if (TYPE_DGLAB_V3.equals(deviceType)) {
-            // 郊狼类型同时扫描 V2("D-LAB ESTIM01") 和 V3("47L121") 前缀
-            return BleScanner.COYOTE_ALL_PREFIXES;
-        }
-        // 默认按郊狼全系列扫描
-        return BleScanner.COYOTE_ALL_PREFIXES;
+        // 返回精确设备名列表（同时扫描 V2 和 V3）
+        return BleScanner.COYOTE_VALID_NAMES;
     }
 
     private void rebuildList() {
@@ -423,7 +431,8 @@ public class DeviceManagerVM extends AndroidViewModel {
         super.onCleared();
         bleScanner.stopScan();
         for (ConnectedDevice cd : connectedMap.values()) {
-            cd.getAdapter().release();
+            cd.getAdapter().emergencyStop();  // 先停止
+            cd.getAdapter().release();        // 再释放
         }
     }
 }

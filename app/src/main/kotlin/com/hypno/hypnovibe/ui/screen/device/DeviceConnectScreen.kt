@@ -1,6 +1,7 @@
 package com.hypno.hypnovibe.ui.screen.device
 
 import android.widget.Toast
+import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
@@ -56,16 +57,27 @@ fun DeviceConnectScreen(deviceType: String, navController: NavController) {
     val btPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
+        Log.w("DeviceConnect", "permission result: $result")
         if (result.values.all { it }) {
+            Log.w("DeviceConnect", "all permissions granted, starting scan")
             vm.startScan(deviceType)
         } else {
+            Log.w("DeviceConnect", "permissions denied")
             Toast.makeText(context, "需要蓝牙权限才能扫描设备", Toast.LENGTH_SHORT).show()
         }
     }
 
     fun ensureBtPermissionAndScan() {
-        val permissions = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-            arrayOf(android.Manifest.permission.BLUETOOTH_SCAN, android.Manifest.permission.BLUETOOTH_CONNECT)
+        val sdk = android.os.Build.VERSION.SDK_INT
+        // 对齐官方：无论哪个 Android 版本，都请求定位权限
+        // vivo/OPPO/小米 ROM 即使 Android 12+ 也需要定位权限才能 BLE 扫描
+        val permissions = if (sdk >= android.os.Build.VERSION_CODES.S) {
+            arrayOf(
+                android.Manifest.permission.BLUETOOTH_SCAN,
+                android.Manifest.permission.BLUETOOTH_CONNECT,
+                android.Manifest.permission.BLUETOOTH_ADVERTISE,
+                android.Manifest.permission.ACCESS_FINE_LOCATION
+            )
         } else {
             arrayOf(android.Manifest.permission.ACCESS_FINE_LOCATION)
         }
@@ -73,13 +85,17 @@ fun DeviceConnectScreen(deviceType: String, navController: NavController) {
             ContextCompat.checkSelfPermission(context, it) ==
                 android.content.pm.PackageManager.PERMISSION_GRANTED
         }
+        Log.w("DeviceConnect", "SDK=$sdk, permissions=${permissions.joinToString()}, granted=$granted, btEnabled=${vm.isBluetoothEnabled()}")
         if (granted) {
             if (!vm.isBluetoothEnabled()) {
+                Log.w("DeviceConnect", "BT not enabled, showing toast")
                 Toast.makeText(context, "请先开启蓝牙", Toast.LENGTH_SHORT).show()
                 return
             }
+            Log.w("DeviceConnect", "BT OK, starting scan")
             vm.startScan(deviceType)
         } else {
+            Log.w("DeviceConnect", "requesting permissions: ${permissions.joinToString()}")
             btPermissionLauncher.launch(permissions)
         }
     }

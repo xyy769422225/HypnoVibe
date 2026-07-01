@@ -7,8 +7,6 @@ import android.bluetooth.le.AdvertiseData;
 import android.bluetooth.le.AdvertiseSettings;
 import android.bluetooth.le.BluetoothLeAdvertiser;
 import android.content.Context;
-import android.os.Handler;
-import android.os.Looper;
 import android.os.ParcelUuid;
 import android.util.Log;
 
@@ -23,17 +21,23 @@ import java.util.UUID;
  * Love Spouse 2.4G 设备适配器。
  * <p>
  * 通过 libble.so JNI 编码 BLE 广播数据，控制 MuSe/Love Spouse 兼容玩具。
- * 基于官方 Love Spouse APK v4.0.0 逆向实现，无需 GATT 配对。
+ * 基于官方 Love Spouse APK v4.0.0 逆向实现。
  * <p>
- * 广播机制：每次命令发送后约 1 秒自动停止，因此内部定时器每 900ms 重发
- * 当前等级的广播包以维持持续振动。
+ * 协议特点：设备端锁存最后收到的命令，因此只需在参数变化时发送一次，
+ * 无需持续重发。
+ * <p>
+ * 支持三类命令：
+ * <ul>
+ *   <li>强度 (0-9): 持续振动，等价于官方滑块</li>
+ *   <li>模式 ("01"-"09" 等): 内置振动 pattern，等价于模式选择</li>
+ *   <li>停止 ("00"): 立即停止所有振动</li>
+ * </ul>
  */
 public class LoveSpouseAdapter implements DeviceProtocolAdapter {
 
     private static final String TAG = "LoveSpouseAdapter";
 
-    /** 广播标识 UUID（官方 APK 从资源加载，此处用固定值） */
-    private static final UUID ADVERTISE_SERVICE_UUID =
+    private static final UUID SERVICE_UUID =
             UUID.fromString("0000fff0-0000-1000-8000-00805f9b34fb");
 
     // ===== 标识 =====
@@ -47,14 +51,9 @@ public class LoveSpouseAdapter implements DeviceProtocolAdapter {
     private volatile boolean advertising = false;
     private volatile boolean released = false;
 
-    // ===== 强度状态 =====
-    private volatile int currentLevel = -1;  // -1 = 未初始化
-    private volatile int targetLevel = 0;
-
-    // ===== 定时器 =====
-    private final Handler mainHandler = new Handler(Looper.getMainLooper());
-    private Runnable keepAliveRunnable;
-    private long lastBroadcastTime = 0;
+    // ===== 状态 =====
+    private volatile int currentStrength = 0;
+    private volatile String lastCommand = null;  // 记录最后发送的命令
 
     public LoveSpouseAdapter(String deviceId) {
         this.deviceId = deviceId;
@@ -64,15 +63,8 @@ public class LoveSpouseAdapter implements DeviceProtocolAdapter {
     //  DeviceProtocolAdapter 实现
     // ══════════════════════════════════════════════════════
 
-    @Override
-    public String getDeviceType() {
-        return LoveSpouseConstants.DEVICE_TYPE;
-    }
-
-    @Override
-    public String getDeviceId() {
-        return deviceId;
-    }
+    @Override public String getDeviceType() { return LoveSpouseConstants.DEVICE_TYPE; }
+    @Override public String getDeviceId() { return deviceId; }
 
     @SuppressLint("MissingPermission")
     @Override
@@ -92,105 +84,97 @@ public class LoveSpouseAdapter implements DeviceProtocolAdapter {
             return;
         }
 
-        // 初始发送停止命令（确保安全）
-        sendBroadcast(0);
-        currentLevel = 0;
-        targetLevel = 0;
-
-        // 启动持续广播保活定时器
-        startKeepAlive();
-
-        notifyState(AdapterStatus.State.CONNECTED, "广播已开启");
+        // 初始发一次停止（安全）
+        sendCommand(LoveSpouseConstants.STOP_ALL, LoveSpouseConstants.CommandType.STOP);
+        notifyState(AdapterStatus.State.CONNECTED, "广播已就绪");
     }
 
     @SuppressLint("MissingPermission")
     @Override
     public void disconnect() {
         released = true;
-        stopKeepAlive();
-        stopAdvertising();
-        sendBroadcast(0); // 最后发送一次停止
-        notifyState(AdapterStatus.State.DISCONNECTED, "广播已停止");
+        sendCommand(LoveSpouseConstants.STOP_ALL, LoveSpouseConstants.CommandType.STOP);
+        notifyState(AdapterStatus.State.DISCONNECTED, "已停止");
     }
 
     @Override
     public void release() {
         released = true;
-        stopKeepAlive();
         stopAdvertising();
         advertiser = null;
     }
 
-    @Override
-    public void updateSnapshot(Map<String, byte[]> channelData,
-                               Map<String, Long> offsetsInSegment) {
-        // Phase 5 填充
-    }
+    @Override public void updateSnapshot(Map<String, byte[]> channelData,
+                                          Map<String, Long> offsetsInSegment) { /* Phase 5 */ }
 
-    @Override
-    public void flush() {
-        // Phase 5 填充
-    }
+    @Override public void flush() { /* Phase 5 */ }
 
     @SuppressLint("MissingPermission")
     @Override
     public void emergencyStop() {
-        targetLevel = 0;
-        sendBroadcast(0);
-        currentLevel = 0;
+        sendCommand(LoveSpouseConstants.STOP_ALL, LoveSpouseConstants.CommandType.STOP);
+        currentStrength = 0;
     }
 
-    @Override
-    public boolean validateSegmentData(byte[] protobufBytes) {
-        return false;
-    }
+    @Override public boolean validateSegmentData(byte[] protobufBytes) { return false; }
 
     // ══════════════════════════════════════════════════════
-    //  测试面板手动控制 API
+    //  公共控制 API
     // ══════════════════════════════════════════════════════
 
-    /** 设置振动等级（0-9） */
-    public void setManualStrength(int level) {
-        targetLevel = clamp(level, LoveSpouseConstants.STRENGTH_MIN, LoveSpouseConstants.STRENGTH_MAX);
+    /** 设置强度 (0-9)，官方滑块等价 */
+    public void setStrength(int level) {
+        int clamped = clamp(level, LoveSpouseConstants.STRENGTH_MIN, LoveSpouseConstants.STRENGTH_MAX);
+        if (clamped == currentStrength && lastCommand != null) return; // unchanged
+        currentStrength = clamped;
+        sendCommand(LoveSpouseConstants.STRENGTH_COMMANDS[clamped],
+                    LoveSpouseConstants.CommandType.STRENGTH);
     }
 
-    public int getCurrentLevel() {
-        return currentLevel;
+    /** 切换模式 (hex 字符串如 "01", "35", "42") */
+    public void sendMode(String commandHex) {
+        sendCommand(commandHex, LoveSpouseConstants.CommandType.MODE);
     }
 
-    public boolean isAdvertising() {
-        return advertising && !released;
+    /** 停止 */
+    public void stop() {
+        sendCommand(LoveSpouseConstants.STOP_ALL, LoveSpouseConstants.CommandType.STOP);
+        currentStrength = 0;
     }
+
+    /** 获取最后发送的命令 */
+    public String getLastCommand() { return lastCommand; }
+
+    public int getCurrentStrength() { return currentStrength; }
+
+    public boolean isAdvertising() { return advertising && !released; }
 
     // ══════════════════════════════════════════════════════
-    //  内部：BLE 广播发送
+    //  内部：统一命令发送
     // ══════════════════════════════════════════════════════
 
     @SuppressLint("MissingPermission")
-    private void sendBroadcast(int level) {
+    private void sendCommand(String hexCmd, LoveSpouseConstants.CommandType type) {
         if (advertiser == null || released) return;
 
-        // 速率限制：同一等级 100ms 内不重发
-        long now = System.currentTimeMillis();
-        if (level == currentLevel && now - lastBroadcastTime < LoveSpouseConstants.BROADCAST_INTERVAL_MS) {
-            return;
-        }
+        // 去重：同一命令不重复发
+        if (hexCmd.equals(lastCommand)) return;
 
-        // 停止旧广播
         stopAdvertising();
 
         // JNI 编码
-        byte[] payload = buildRfPayload(level);
+        byte[] payload = encode(hexCmd);
 
-        // 构建广播数据
+        // 广播数据
         AdvertiseData data = new AdvertiseData.Builder()
-                .addServiceUuid(new ParcelUuid(ADVERTISE_SERVICE_UUID))
+                .addServiceUuid(new ParcelUuid(SERVICE_UUID))
                 .addManufacturerData(LoveSpouseConstants.MANUFACTURER_ID, payload)
                 .build();
 
-        // 构建广播设置
-        int mode = (level == 0) ? LoveSpouseConstants.ADVERTISE_MODE_STOP
-                                : LoveSpouseConstants.ADVERTISE_MODE_POWER;
+        // 广播设置：强度/模式用低延迟，停止用均衡
+        int mode = (type == LoveSpouseConstants.CommandType.STOP)
+                ? LoveSpouseConstants.ADVERTISE_MODE_STOP
+                : LoveSpouseConstants.ADVERTISE_MODE_POWER;
         int advertiseMode = (mode == 1) ? AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY
                                         : AdvertiseSettings.ADVERTISE_MODE_BALANCED;
         int timeout = (mode == 1) ? 2000 : 3000;
@@ -203,28 +187,19 @@ public class LoveSpouseAdapter implements DeviceProtocolAdapter {
                 .build();
 
         currentCallback = new AdvertiseCallback() {
-            @Override
-            public void onStartSuccess(AdvertiseSettings settingsInEffect) {
-                advertising = true;
-            }
-
-            @Override
-            public void onStartFailure(int errorCode) {
+            @Override public void onStartSuccess(AdvertiseSettings s) { advertising = true; }
+            @Override public void onStartFailure(int code) {
                 advertising = false;
-                Log.e(TAG, "advertising failed: " + errorCode);
-                if (statusCallback != null) {
-                    statusCallback.onCycleStats(deviceId, 0, false);
-                }
+                Log.e(TAG, "ad failed: " + code);
             }
         };
 
         try {
             advertiser.startAdvertising(settings, data, currentCallback);
             advertising = true;
-            currentLevel = level;
-            lastBroadcastTime = now;
+            lastCommand = hexCmd;
         } catch (Exception e) {
-            Log.e(TAG, "startAdvertising exception", e);
+            Log.e(TAG, "ad exception", e);
             advertising = false;
         }
     }
@@ -233,89 +208,35 @@ public class LoveSpouseAdapter implements DeviceProtocolAdapter {
     private void stopAdvertising() {
         advertising = false;
         if (advertiser != null && currentCallback != null) {
-            try {
-                advertiser.stopAdvertising(currentCallback);
-            } catch (Exception ignored) {}
+            try { advertiser.stopAdvertising(currentCallback); } catch (Exception ignored) {}
         }
         currentCallback = null;
     }
 
     // ══════════════════════════════════════════════════════
-    //  内部：持续广播保活
+    //  JNI 编码
     // ══════════════════════════════════════════════════════
 
     /**
-     * 启动保活定时器。因为 BLE 广播约 1 秒后自动停止，需要每 900ms 重发
-     * 当前目标等级的广播包以维持持续振动。
-     */
-    private void startKeepAlive() {
-        stopKeepAlive();
-        keepAliveRunnable = new Runnable() {
-            @Override
-            public void run() {
-                if (released) return;
-                sendBroadcast(targetLevel);
-                mainHandler.postDelayed(this, LoveSpouseConstants.ADVERTISE_STOP_DELAY_MS - 100);
-            }
-        };
-        mainHandler.post(keepAliveRunnable);
-    }
-
-    private void stopKeepAlive() {
-        if (keepAliveRunnable != null) {
-            mainHandler.removeCallbacks(keepAliveRunnable);
-            keepAliveRunnable = null;
-        }
-    }
-
-    // ══════════════════════════════════════════════════════
-    //  内部：JNI 编码
-    // ══════════════════════════════════════════════════════
-
-    /**
-     * 通过 libble.so 的 get_rf_payload() 编码广播数据。
+     * 对任意 hex 命令字符串进行 JNI 编码。
      * <p>
-     * 数据格式：[5字节前缀 wbMSE] + [1字节命令] + [5字节 CRC/校验] = 11 字节。
-     *
-     * @param level 振动等级 0-9
-     * @return 编码后的广播 payload
+     * 输出 = get_rf_payload(prefix, payload, output)
+     * payload 为单字节 hexCmd 的值。
      */
-    static byte[] buildRfPayload(int level) {
-        int idx = clamp(level, 0, LoveSpouseConstants.STRENGTH_COMMANDS.length - 1);
-        String hexStr = LoveSpouseConstants.STRENGTH_COMMANDS[idx];
-
-        // 将 hex 字符串转换为单字节
-        byte cmdByte = hexToByte(hexStr);
-        byte[] cmd = new byte[] { cmdByte };
-
-        int outputLen = LoveSpouseConstants.PREFIX.length + 1 + LoveSpouseConstants.RF_PAYLOAD_OVERHEAD;
-        byte[] output = new byte[outputLen];
-
-        BLEUtil.get_rf_payload(
-            LoveSpouseConstants.PREFIX, LoveSpouseConstants.PREFIX.length,
-            cmd, 1,
-            output
-        );
-
+    static byte[] encode(String hexCmd) {
+        byte[] prefix = {0x77, 0x62, 0x4D, 0x53, 0x45}; // "wbMSE"
+        byte cmdByte = (byte) Integer.parseInt(hexCmd, 16);
+        byte[] output = new byte[prefix.length + 1 + LoveSpouseConstants.RF_PAYLOAD_OVERHEAD];
+        BLEUtil.get_rf_payload(prefix, prefix.length, new byte[]{cmdByte}, 1, output);
         return output;
     }
 
-    /** hex 字符串 "11" → byte 0x11 */
-    private static byte hexToByte(String hex) {
-        if (hex.length() == 1) {
-            hex = "0" + hex;
-        }
-        return (byte) Integer.parseInt(hex, 16);
-    }
-
     // ══════════════════════════════════════════════════════
-    //  内部：工具方法
+    //  工具
     // ══════════════════════════════════════════════════════
 
     private void notifyState(AdapterStatus.State state, String detail) {
-        if (statusCallback != null) {
-            statusCallback.onStateChanged(state, deviceId, detail);
-        }
+        if (statusCallback != null) statusCallback.onStateChanged(state, deviceId, detail);
     }
 
     private static int clamp(int v, int min, int max) {

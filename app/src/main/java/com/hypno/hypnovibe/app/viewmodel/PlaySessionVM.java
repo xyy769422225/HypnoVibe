@@ -4,8 +4,13 @@ import android.app.Application;
 import android.net.Uri;
 import android.util.Log;
 import androidx.lifecycle.AndroidViewModel;
+import com.hypno.hypnovibe.app.manager.ChannelMappingCoordinator;
+import com.hypno.hypnovibe.app.manager.DeviceTypeRegistry;
 import com.hypno.hypnovibe.app.manager.PlaylistManager;
+import com.hypno.hypnovibe.app.manager.TimelineEngine;
+import com.hypno.hypnovibe.app.manager.TimelineManager;
 import com.hypno.hypnovibe.domain.entity.Playlist;
+import com.hypno.hypnovibe.domain.entity.TimelineScript;
 import com.hypno.hypnovibe.domain.repository.IPlaylistRepository;
 import com.hypno.hypnovibe.infrastructure.audio.AudioEngine;
 import com.hypno.hypnovibe.infrastructure.io.JsonFileRepository;
@@ -31,6 +36,14 @@ public class PlaySessionVM extends AndroidViewModel {
     private final MutableStateFlow<Integer> currentTrackIndex = StateFlowKt.MutableStateFlow(-1);
     private ScheduledExecutorService positionPoller;
     private volatile boolean completedFired = false;
+
+    // ── 播放锁与预加载（Phase 5.5）──
+    private volatile boolean playbackLocked = false;
+    private volatile boolean pendingReload = false;
+    private final MutableStateFlow<Boolean> isLocked = StateFlowKt.MutableStateFlow(false);
+    private TimelineManager timelineManager;
+    private ChannelMappingCoordinator channelMappingCoordinator;
+    private TimelineEngine timelineEngine;
 
     /**
      * 位置更新监听器，供后续 PlaybackCoordinator 接入驱动设备链路。
@@ -64,6 +77,8 @@ public class PlaySessionVM extends AndroidViewModel {
         loading = StateFlowKt.MutableStateFlow(false);
         JsonFileRepository jsonRepo = new JsonFileRepository(app, "playlists");
         this.manager = new PlaylistManager(new PlaylistRepo(jsonRepo));
+        this.timelineManager = new TimelineManager(new JsonFileRepository(app, "timelines"));
+        this.channelMappingCoordinator = new ChannelMappingCoordinator(new DeviceTypeRegistry());
     }
 
     // ── StateFlow getters ──
@@ -74,6 +89,7 @@ public class PlaySessionVM extends AndroidViewModel {
     public StateFlow<Long> getDurationMs() { return durationMs; }
     public StateFlow<Boolean> getIsPlayingState() { return isPlaying; }
     public StateFlow<Boolean> getIsLoading() { return isLoading; }
+    public StateFlow<Boolean> getIsLocked() { return isLocked; }
     public StateFlow<String> getErrorMsg() { return errorMsg; }
     public StateFlow<Integer> getCurrentTrackIndex() { return currentTrackIndex; }
     public StateFlow<String> getCurrentPlayingPlaylistId() { return currentPlayingPlaylistId; }
@@ -84,11 +100,18 @@ public class PlaySessionVM extends AndroidViewModel {
     public void createPlaylist(String name, String configId) { Playlist p = manager.createPlaylist(name, configId); currentPlaylist.setValue(p); loadPlaylists(); }
 
     public void addTrack(String playlistId, String audioPath, String title, long durationMs) {
+        if (playbackLocked) {
+            errorMsg.setValue("播放中无法添加曲目，请先暂停");
+            return;
+        }
         // 在后台线程把 content:// URI 持久化到内部存储
         ioExecutor.execute(() -> {
             String storedPath = persistToInternal(audioPath, title);
             Playlist p = manager.addTrack(playlistId, storedPath, title, durationMs);
-            if (p != null) currentPlaylist.setValue(p);
+            if (p != null) {
+                currentPlaylist.setValue(p);
+                pendingReload = true;
+            }
         });
     }
 
@@ -146,6 +169,7 @@ public class PlaySessionVM extends AndroidViewModel {
                 if (!audioEngine.loadFile(getApplication(), audioPath)) {
                     Log.e(TAG, "loadFile failed: " + audioPath);
                     audioEngine = null;
+                    setPlaybackLocked(false);
                     isLoading.setValue(false);
                     errorMsg.setValue("无法加载音频文件，请删除后重新添加");
                     return;
@@ -159,6 +183,7 @@ public class PlaySessionVM extends AndroidViewModel {
                 isPlaying.setValue(true);
                 isLoading.setValue(false);
                 completedFired = false;
+                setPlaybackLocked(true);
                 startPositionPoller();
                 Log.d(TAG, "playing: duration=" + audioEngine.getDurationMs() + "ms");
             } catch (Throwable t) {
@@ -167,6 +192,7 @@ public class PlaySessionVM extends AndroidViewModel {
                     try { audioEngine.release(); } catch (Exception ignored) {}
                     audioEngine = null;
                 }
+                setPlaybackLocked(false);
                 isLoading.setValue(false);
                 errorMsg.setValue("播放出错: " + t.getMessage());
             }
@@ -175,17 +201,31 @@ public class PlaySessionVM extends AndroidViewModel {
 
     public void togglePlayPause() {
         if (audioEngine == null) {
-            // 未加载 → 自动播放第一首
+            // 未加载 → 预加载时间轴索引 → 自动播放第一首
             Playlist pl = currentPlaylist.getValue();
             if (pl != null && !pl.getTracks().isEmpty()) {
+                if (timelineEngine == null || pendingReload) {
+                    preloadAll(pl);
+                    pendingReload = false;
+                }
                 playTrack(0);
             }
             return;
         }
         if (audioEngine.isPlaying()) {
+            // 暂停 → 解锁允许变更
             audioEngine.pause();
             isPlaying.setValue(false);
+            stopPositionPoller();
+            setPlaybackLocked(false);
         } else {
+            // 恢复 → 如已变更则重新预加载
+            if (pendingReload) {
+                Playlist pl = currentPlaylist.getValue();
+                if (pl != null) preloadAll(pl);
+                pendingReload = false;
+            }
+            setPlaybackLocked(true);
             audioEngine.play();
             isPlaying.setValue(true);
             completedFired = false;
@@ -209,7 +249,7 @@ public class PlaySessionVM extends AndroidViewModel {
         if (next >= pl.getTracks().size()) {
             if ("LOOP_LIST".equals(mode)) next = 0;
             else if ("LOOP_LAST".equals(mode)) { playTrack(idx); return; }
-            else { isPlaying.setValue(false); currentPlayingPlaylistId.setValue(null); return; }
+            else { setPlaybackLocked(false); isPlaying.setValue(false); currentPlayingPlaylistId.setValue(null); return; }
         }
         playTrack(next);
     }
@@ -245,6 +285,10 @@ public class PlaySessionVM extends AndroidViewModel {
                 Playlist pl = currentPlaylist.getValue();
                 if (pl != null && ("LOOP_LIST".equals(pl.getPlayMode()) || "LOOP_LAST".equals(pl.getPlayMode()))) {
                     playNext();
+                } else {
+                    // 播放完毕，解锁
+                    setPlaybackLocked(false);
+                    currentPlayingPlaylistId.setValue(null);
                 }
             }
         }, 0, 33, TimeUnit.MILLISECONDS);
@@ -254,6 +298,69 @@ public class PlaySessionVM extends AndroidViewModel {
         if (positionPoller != null) {
             positionPoller.shutdownNow();
             positionPoller = null;
+        }
+    }
+
+    // ══════════════════════════════════════════════════════
+    //  播放锁与预加载（Phase 5.5）
+    // ══════════════════════════════════════════════════════
+
+    /** 完整预加载：加载所有时间轴脚本 + 构建二分查找索引 */
+    private void preloadAll(Playlist playlist) {
+        TimelineEngine engine = new TimelineEngine();
+        for (Playlist.Track track : playlist.getTracks()) {
+            String scriptPath = track.getTimelineScriptPath();
+            if (scriptPath == null) continue;
+            TimelineScript script = timelineManager.load(scriptPath);
+            if (script == null) {
+                Log.w(TAG, "preloadAll: script not found: " + scriptPath);
+                continue;
+            }
+            for (TimelineScript.ChannelTimeline ct : script.getChannels()) {
+                engine.registerChannel(ct);
+            }
+        }
+        this.timelineEngine = engine;
+        Log.d(TAG, "preloadAll: " + engine.getChannelCount() + " channels indexed");
+    }
+
+    private void setPlaybackLocked(boolean locked) {
+        this.playbackLocked = locked;
+        isLocked.setValue(locked);
+    }
+
+    /** 切换时间轴脚本（仅暂停时允许） */
+    public void setTimelineScript(String playlistId, String trackId, String scriptPath) {
+        if (playbackLocked) {
+            errorMsg.setValue("播放中无法切换时间轴，请先暂停");
+            return;
+        }
+        manager.setTimelineScript(playlistId, trackId, scriptPath);
+        pendingReload = true;
+        Playlist pl = currentPlaylist.getValue();
+        if (pl != null && pl.getId().equals(playlistId)) {
+            currentPlaylist.setValue(manager.findById(playlistId));
+        }
+    }
+
+    /** 获取当前播放列表的通道映射 */
+    public Map<String, Playlist.ChannelMappingEntry> getChannelMapping() {
+        Playlist pl = currentPlaylist.getValue();
+        if (pl == null) return Collections.emptyMap();
+        return pl.getChannelMapping();
+    }
+
+    /** 设置通道映射并持久化 */
+    public void updateChannelMapping(String playlistId,
+                                     Map<String, Playlist.ChannelMappingEntry> mapping) {
+        if (playbackLocked) {
+            errorMsg.setValue("播放中无法修改通道映射，请先暂停");
+            return;
+        }
+        manager.setChannelMapping(playlistId, mapping);
+        Playlist pl = currentPlaylist.getValue();
+        if (pl != null && pl.getId().equals(playlistId)) {
+            currentPlaylist.setValue(manager.findById(playlistId));
         }
     }
 

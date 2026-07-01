@@ -22,7 +22,7 @@ android {
     defaultConfig {
         applicationId = "com.hypno.hypnovibe"
         minSdk = 24
-        targetSdk = 36
+        targetSdk = 34
         versionCode = 1
         versionName = "0.1.0-phase1"
 

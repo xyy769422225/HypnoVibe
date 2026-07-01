@@ -66,14 +66,21 @@ public class DGLabV3Adapter implements DeviceProtocolAdapter, DGLabController {
     private volatile boolean waitingConfirm = false;
     private long lastB1Time = 0;
 
-    private int[] freqA = DGLabB0Builder.basicFreq();
-    private int[] waveA = DGLabB0Builder.basicWaveStrength();
-    private int[] freqB = DGLabB0Builder.basicFreq();
-    private int[] waveB = DGLabB0Builder.basicWaveStrength();
+    private int[] waveDataA = DGLabB0Builder.defaultWaveData();
+    private int[] waveDataB = DGLabB0Builder.defaultWaveData();
 
     private DGLabController.DGLabListener dglabListener;
     private volatile boolean connected = false;
     private volatile boolean released = false;
+    private Runnable connectTimeoutTask;
+
+    // === 波形播放模式 ===
+    private volatile boolean waveModeA = false;
+    private volatile int waveFreqA = 10;
+    private volatile int waveStrengthA = 0;
+    private volatile boolean waveModeB = false;
+    private volatile int waveFreqB = 10;
+    private volatile int waveStrengthB = 0;
 
     public DGLabV3Adapter(String deviceId) {
         this.deviceId = deviceId;
@@ -100,12 +107,25 @@ public class DGLabV3Adapter implements DeviceProtocolAdapter, DGLabController {
             return;
         }
         BluetoothDevice device = adapter.getRemoteDevice(address);
+        // 连接超时看门狗：对齐官方 timeout(15000)
+        cancelConnectTimeout();
+        connectTimeoutTask = () -> {
+            if (!connected && gatt != null) {
+                Log.w(TAG, "connection timeout");
+                try { gatt.disconnect(); gatt.close(); } catch (Exception ignored) {}
+                gatt = null;
+                notifyState(AdapterStatus.State.ERROR, "连接超时");
+                if (dglabListener != null) dglabListener.onDisconnected();
+            }
+        };
+        mainHandler.postDelayed(connectTimeoutTask, 15000);
         gatt = device.connectGatt(ctx, false, gattCallback);
     }
 
     @SuppressLint("MissingPermission")
     @Override
     public void disconnect() {
+        cancelConnectTimeout();
         stopTimer();
         connected = false;
         if (gatt != null) {
@@ -128,7 +148,7 @@ public class DGLabV3Adapter implements DeviceProtocolAdapter, DGLabController {
     @Override
     public void updateSnapshot(Map<String, byte[]> channelData,
                                Map<String, Long> offsetsInSegment) {
-        // Phase 5.5 填充：从快照提取波形数据更新 freqA/waveA/freqB/waveB
+        // Phase 5.5 填充：从快照提取波形数据更新 waveDataA/waveDataB
     }
 
     @Override
@@ -145,7 +165,7 @@ public class DGLabV3Adapter implements DeviceProtocolAdapter, DGLabController {
         byte[] cmd = DGLabB0Builder.buildB0(
             true, seq,
             DGLabB0Builder.MODE_ABSOLUTE, DGLabB0Builder.MODE_ABSOLUTE,
-            0, 0, freqA, waveA, freqB, waveB);
+            0, 0, waveDataA, waveDataB);
         writeCharacteristic(cmd);
         waitingConfirm = true;
         pendingSeqNo.set(seq);
@@ -169,7 +189,34 @@ public class DGLabV3Adapter implements DeviceProtocolAdapter, DGLabController {
     public int getDeviceStrengthB() { return deviceStrengthB; }
     public boolean isSafetyOn() { return safetyOn; }
     public void unlockSafety() { safetyOn = false; }
-    public boolean isConnected() { return connected && !released; }
+   @Override public boolean isConnected() { return connected && !released; }
+
+    // === 波形播放（DGLabController 新增方法） ===
+
+    @Override
+    public void sendChannelWaveFrame(int channel, int frequency, int strength) {
+        int f = clamp(frequency, 10, 240);
+        int s = clamp(strength, 0, 200);
+        if (channel == 0) {
+            waveModeA = true;
+            waveFreqA = f;
+            waveStrengthA = s;
+        } else {
+            waveModeB = true;
+            waveFreqB = f;
+            waveStrengthB = s;
+        }
+    }
+
+    @Override
+    public void sendSilentFrame() {
+        waveModeA = false;
+        waveModeB = false;
+        waveFreqA = 10;
+        waveStrengthA = 0;
+        waveFreqB = 10;
+        waveStrengthB = 0;
+    }
 
     // ══════════════════════════════════════════════════════
     //  GATT 回调
@@ -180,9 +227,12 @@ public class DGLabV3Adapter implements DeviceProtocolAdapter, DGLabController {
         @Override
         public void onConnectionStateChange(BluetoothGatt g, int status, int newState) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
+                cancelConnectTimeout();
                 Log.d(TAG, "GATT connected, discovering services");
+                // 对齐官方：无 requestMtu，直接 discoverServices
                 g.discoverServices();
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                cancelConnectTimeout();
                 Log.w(TAG, "GATT disconnected (status=" + status + ")");
                 connected = false;
                 stopTimer();
@@ -279,6 +329,12 @@ public class DGLabV3Adapter implements DeviceProtocolAdapter, DGLabController {
     private void onTimerTick() {
         if (released || !connected || gatt == null || writeChar == null) return;
 
+        // 波形模式：直接发送波形帧，不处理强度变化/安全开关/流控
+        if (waveModeA || waveModeB) {
+            sendWaveModeB0();
+            return;
+        }
+
         if (waitingConfirm && System.currentTimeMillis() - lastB1Time > B1_TIMEOUT_MS) {
             waitingConfirm = false;
             pendingSeqNo.set(0);
@@ -299,7 +355,7 @@ public class DGLabV3Adapter implements DeviceProtocolAdapter, DGLabController {
             byte[] cmd = DGLabB0Builder.buildB0(
                 true, seq, modeA, modeB,
                 targetStrengthA, targetStrengthB,
-                freqA, waveA, freqB, waveB);
+                waveDataA, waveDataB);
             writeCharacteristic(cmd);
         } else {
             sendB0StrengthUnchanged();
@@ -310,7 +366,30 @@ public class DGLabV3Adapter implements DeviceProtocolAdapter, DGLabController {
         byte[] cmd = DGLabB0Builder.buildB0(
             false, 0,
             DGLabB0Builder.MODE_UNCHANGED, DGLabB0Builder.MODE_UNCHANGED,
-            0, 0, freqA, waveA, freqB, waveB);
+            0, 0, waveDataA, waveDataB);
+        writeCharacteristic(cmd);
+    }
+
+    /** 波形模式下的 B0 发送：不改变通道强度，只更新波形数据 */
+    private void sendWaveModeB0() {
+        int[] aw = waveDataA;
+        int[] bw = waveDataB;
+        // 波形模式下打包频率和强度为 8 字节波形数据
+        if (waveModeA) {
+            aw = DGLabB0Builder.packWaveData(
+                new int[]{waveFreqA, waveFreqA, waveFreqA, waveFreqA},
+                new int[]{waveStrengthA, waveStrengthA, waveStrengthA, waveStrengthA});
+        }
+        if (waveModeB) {
+            bw = DGLabB0Builder.packWaveData(
+                new int[]{waveFreqB, waveFreqB, waveFreqB, waveFreqB},
+                new int[]{waveStrengthB, waveStrengthB, waveStrengthB, waveStrengthB});
+        }
+        // 不修改强度，纯波形输出
+        byte[] cmd = DGLabB0Builder.buildB0(
+            false, 0,
+            DGLabB0Builder.MODE_UNCHANGED, DGLabB0Builder.MODE_UNCHANGED,
+            0, 0, aw, bw);
         writeCharacteristic(cmd);
     }
 
@@ -328,6 +407,13 @@ public class DGLabV3Adapter implements DeviceProtocolAdapter, DGLabController {
         int s = pendingSeqNo.get();
         if (s == 0) return 1;
         return (s % 15) + 1;
+    }
+
+    private void cancelConnectTimeout() {
+        if (connectTimeoutTask != null) {
+            mainHandler.removeCallbacks(connectTimeoutTask);
+            connectTimeoutTask = null;
+        }
     }
 
     private void notifyState(AdapterStatus.State state, String detail) {

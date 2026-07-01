@@ -15,6 +15,12 @@ public interface DGLabController {
     int getDeviceStrengthA();
     int getDeviceStrengthB();
 
+    /** 发送单个通道的波形帧（频率 + 强度），另一通道不变 */
+    void sendChannelWaveFrame(int channel, int frequency, int strength);
+
+    /** 发送静默帧（两通道都不输出波形） */
+    void sendSilentFrame();
+
     /** 安全开关状态 */
     boolean isSafetyOn();
 

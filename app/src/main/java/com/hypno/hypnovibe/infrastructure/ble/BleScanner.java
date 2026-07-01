@@ -2,78 +2,99 @@ package com.hypno.hypnovibe.infrastructure.ble;
 
 import android.annotation.SuppressLint;
 import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
 import android.bluetooth.le.BluetoothLeScanner;
+import android.bluetooth.le.ScanCallback;
 import android.bluetooth.le.ScanResult;
 import android.bluetooth.le.ScanSettings;
+import android.content.Context;
+import android.location.LocationManager;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * BLE 扫描器。仅负责扫描和按设备名前缀过滤，不负责连接。
- * 连接由各设备的 Adapter.connect() 内部完成。
+ * BLE 扫描器。仅负责扫描和按设备名过滤，不负责连接。
  *
- * 说明：{@link BluetoothLeScanner} 实例不缓存。蓝牙开关状态会使其失效
- *（关闭后变 null，重开后系统会返回新实例），因此在每次 startScan 时实时获取，
- * 避免蓝牙重开之后仍持有旧引用导致 "setting is null" 或误报不可用。
+ * 使用 BluetoothLeScanner（现代 API），不使用 startLeScan（弃用 API 在新 Android 上可能被静默拒绝）。
  */
 public class BleScanner {
 
     private static final String TAG = "BleScanner";
 
-    /** 郊狼 V3 广播名前缀：47L121（含型号码 47L121000 及序列号） */
-    public static final String COYOTE_V3_PREFIX = "47L121";
-    /** 郊狼 V2 广播名：D-LAB ESTIM01（精确匹配） */
-    public static final String COYOTE_V2_NAME = "D-LAB ESTIM01";
-    /** 郊狼全系列扫描前缀列表 */
-    public static final List<String> COYOTE_ALL_PREFIXES =
-            java.util.Arrays.asList(COYOTE_V3_PREFIX, COYOTE_V2_NAME);
+    // ===== 扫描调试开关 =====
 
-    /** 扫描超时（毫秒） */
+    /** 调试模式：true=上报所有设备（不限名称），用于排查扫描问题 */
+    private static final boolean DEBUG_ALL_DEVICES = false;
+
+    // ===== 设备名常量 =====
+
+    public static final String COYOTE_V3_NAME = "47L121000";
+    public static final String COYOTE_V2_NAME = "D-LAB ESTIM01";
+    public static final List<String> COYOTE_VALID_NAMES =
+            Arrays.asList(COYOTE_V3_NAME, COYOTE_V2_NAME);
+    public static final String DFU_PREFIX = "47L121000_O";
+    public static final String DFU_TAG = "DfuTarg";
+
     private static final long SCAN_TIMEOUT_MS = 10000;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
-    /** 当前扫描使用的 scanner 引用（仅扫描期间有效，用于 stopScan） */
+    private Context appContext;
     private BluetoothLeScanner activeScanner;
     private ScanWrapper callbackWrapper;
     private volatile boolean scanning = false;
 
-    /** 扫描结果去重：mac → rssi */
+    /** 上次扫描启动时间，用于诊断 */
+    private long scanStartTime = 0;
+    /** 收到的回调总数，用于诊断 */
+    private int callbackCount = 0;
+
     private final Map<String, Integer> foundDevices = new HashMap<>();
 
-    /** 上层扫描回调接口（不与 android.bluetooth.le.ScanCallback 重名） */
     public interface DeviceScanCallback {
         void onDeviceFound(String mac, String name, int rssi);
         void onScanComplete();
         void onError(String msg);
     }
 
-    public BleScanner() {
+    public BleScanner() {}
+
+    /** 注入 ApplicationContext 用于检测定位服务状态 */
+    public void setAppContext(Context ctx) {
+        this.appContext = ctx.getApplicationContext();
     }
 
-    /** 实时获取 BluetoothAdapter（系统单例） */
+    /** 检测定位服务（GPS 开关）是否开启 */
+    private boolean isLocationServiceEnabled() {
+        if (appContext == null) return true; // 无法检测时不阻断
+        LocationManager lm = (LocationManager) appContext.getSystemService(Context.LOCATION_SERVICE);
+        if (lm == null) return true;
+        boolean gps = lm.isProviderEnabled(LocationManager.GPS_PROVIDER);
+        boolean network = lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
+        return gps || network;
+    }
+
     private BluetoothAdapter getAdapter() {
         return BluetoothAdapter.getDefaultAdapter();
     }
 
-    /** 实时获取 BluetoothLeScanner，蓝牙未开启或不可用时返回 null */
     private BluetoothLeScanner getLeScanner() {
         BluetoothAdapter adapter = getAdapter();
         if (adapter == null || !adapter.isEnabled()) return null;
         return adapter.getBluetoothLeScanner();
     }
 
-    /** 蓝牙当前是否可用（适配器存在且已开启） */
     public boolean isAvailable() {
         return getLeScanner() != null;
     }
 
-    /** 蓝牙适配器是否已开启 */
     public boolean isBluetoothEnabled() {
         BluetoothAdapter adapter = getAdapter();
         return adapter != null && adapter.isEnabled();
@@ -83,69 +104,93 @@ public class BleScanner {
         return scanning;
     }
 
-    /** 开始扫描，过滤郊狼 V3 设备 */
+    @SuppressLint("MissingPermission")
     public void startScan(DeviceScanCallback callback) {
-        startScan(Collections.singletonList(COYOTE_V3_PREFIX), callback);
+        startScan(COYOTE_VALID_NAMES, callback);
     }
 
-    /**
-     * 开始扫描，按给定设备名前缀列表过滤。
-     * 任一前缀命中即上报。前缀列表为空表示不过滤（上报全部设备）。
-     */
     @SuppressLint("MissingPermission")
-    public void startScan(List<String> namePrefixes, DeviceScanCallback callback) {
+    public void startScan(List<String> validNames, DeviceScanCallback callback) {
         if (scanning) stopScan();
 
+        // === 诊断日志：蓝牙状态 ===
+        BluetoothAdapter adapter = getAdapter();
+        Log.w(TAG, "═══════════════════════════════════════");
+        Log.w(TAG, "scan request received");
+        Log.w(TAG, "  SDK_INT = " + Build.VERSION.SDK_INT);
+        Log.w(TAG, "  BluetoothAdapter = " + (adapter != null));
+        Log.w(TAG, "  isEnabled = " + (adapter != null && adapter.isEnabled()));
+        Log.w(TAG, "  isDiscovering = " + (adapter != null && adapter.isDiscovering()));
+        Log.w(TAG, "  LocationService ON = " + isLocationServiceEnabled());
+
         BluetoothLeScanner scanner = getLeScanner();
+        Log.w(TAG, "  BluetoothLeScanner = " + (scanner != null));
+
         if (scanner == null) {
-            BluetoothAdapter adapter = getAdapter();
             String msg = adapter == null
                     ? "本机不支持蓝牙"
                     : "蓝牙未开启，请先打开蓝牙";
+            Log.e(TAG, "scan aborted: " + msg);
             callback.onError(msg);
+            return;
+        }
+
+        // vivo/OPPO/小米等 ROM 要求定位服务物理开启才能 BLE 扫描
+        if (!isLocationServiceEnabled()) {
+            Log.e(TAG, "!!! Location service is OFF — BLE scan will silently return 0 results on this ROM");
+            callback.onError("定位服务未开启。请在手机设置中打开定位（GPS）开关后再试。\n部分手机（vivo/OPPO/小米）要求定位服务开启才能扫描蓝牙设备。");
             return;
         }
 
         foundDevices.clear();
         activeScanner = scanner;
-        callbackWrapper = new ScanWrapper(namePrefixes, callback);
+        callbackWrapper = new ScanWrapper(validNames, callback);
         scanning = true;
+        scanStartTime = System.currentTimeMillis();
+        callbackCount = 0;
 
-        // ScanSettings 不能为 null，部分 ROM（如 vivo）会抛 "setting is null"
-        ScanSettings settings = new ScanSettings.Builder()
-                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-                .build();
-
+        // 尝试方案1: 最简化的两参数 startScan（不传 filter、不传 settings）
+        Log.w(TAG, "calling startScan(callback) — simplest 2-param version...");
         try {
-            scanner.startScan(null, settings, callbackWrapper);
-        } catch (Exception e) {
-            Log.e(TAG, "startScan failed", e);
+            scanner.startScan(callbackWrapper);
+            Log.w(TAG, "startScan(callback) returned OK. Waiting for callbacks...");
+        } catch (SecurityException e) {
+            Log.e(TAG, "startScan() threw SecurityException: " + e.getMessage(), e);
             scanning = false;
             activeScanner = null;
             callbackWrapper = null;
-            callback.onError("扫描启动失败: " + e.getMessage());
+            callback.onError("缺少蓝牙扫描权限: " + e.getMessage());
             return;
         }
 
-        // 扫描超时自动停止
-        mainHandler.postDelayed(this::stopScanInternal, SCAN_TIMEOUT_MS);
+        mainHandler.postDelayed(() -> {
+            long elapsed = System.currentTimeMillis() - scanStartTime;
+            Log.w(TAG, "scan timeout after " + elapsed + "ms, callbacks received: " + callbackCount);
+            stopScanInternal();
+        }, SCAN_TIMEOUT_MS);
     }
 
-    /** 停止扫描 */
     @SuppressLint("MissingPermission")
     public void stopScan() {
+        Log.d(TAG, "stopScan called from outside");
         stopScanInternal();
     }
 
     private void stopScanInternal() {
         if (!scanning) return;
+        long elapsed = System.currentTimeMillis() - scanStartTime;
+        Log.w(TAG, "stopScanInternal, elapsed=" + elapsed + "ms, callbacks=" + callbackCount);
+
         scanning = false;
         mainHandler.removeCallbacksAndMessages(null);
 
         if (activeScanner != null && callbackWrapper != null) {
             try {
                 activeScanner.stopScan(callbackWrapper);
-            } catch (Exception ignored) {}
+                Log.d(TAG, "stopScan(ScanCallback) OK");
+            } catch (Exception e) {
+                Log.e(TAG, "stopScan failed: " + e.getMessage());
+            }
         }
         activeScanner = null;
         if (callbackWrapper != null) {
@@ -154,53 +199,62 @@ public class BleScanner {
         }
     }
 
-    /** 包装系统的 android.bluetooth.le.ScanCallback，按设备名前缀过滤并去重 */
+    // ══════════════════════════════════════════════════════
+    //  ScanCallback 包装
+    // ══════════════════════════════════════════════════════
+
     private class ScanWrapper extends android.bluetooth.le.ScanCallback {
         final DeviceScanCallback callback;
-        final List<String> namePrefixes;
+        final List<String> validNames;
 
-        ScanWrapper(List<String> namePrefixes, DeviceScanCallback callback) {
-            this.namePrefixes = namePrefixes;
+        ScanWrapper(List<String> validNames, DeviceScanCallback callback) {
+            this.validNames = validNames;
             this.callback = callback;
         }
 
         @Override
         public void onScanResult(int callbackType, ScanResult result) {
-            handleResult(result);
+            callbackCount++;
+            handleResult(callbackType, result);
         }
 
         @Override
         public void onBatchScanResults(List<ScanResult> results) {
             if (results == null) return;
-            for (ScanResult r : results) {
-                handleResult(r);
-            }
+            callbackCount += results.size();
+            for (ScanResult r : results) handleResult(-1, r);
         }
 
-        private void handleResult(ScanResult result) {
-            // 优先从广播记录取名（更可靠），回退到设备对象
-            String name = null;
-            if (result.getScanRecord() != null) {
+        private void handleResult(int callbackType, ScanResult result) {
+            BluetoothDevice device = result.getDevice();
+            int rssi = result.getRssi();
+            String mac = device.getAddress();
+
+            String name = device.getName();
+            if (name == null && result.getScanRecord() != null) {
                 name = result.getScanRecord().getDeviceName();
             }
-            if (name == null && result.getDevice().getName() != null) {
-                name = result.getDevice().getName();
-            }
-            if (name == null) return;
 
-            // 前缀过滤：无前缀列表则不过滤
-            if (namePrefixes != null && !namePrefixes.isEmpty()) {
-                boolean match = false;
-                for (String p : namePrefixes) {
-                    if (name.startsWith(p)) { match = true; break; }
+            // 调试模式：上报所有设备
+            if (DEBUG_ALL_DEVICES) {
+                String displayName = (name != null && !name.isEmpty()) ? name : "(no name)";
+                Integer prev = foundDevices.get(mac);
+                if (prev == null) {
+                    foundDevices.put(mac, rssi);
+                    Log.d(TAG, "[DEBUG] #" + callbackCount + ": " + displayName
+                            + " | " + mac + " | RSSI=" + rssi + " | cbType=" + callbackType);
+                    callback.onDeviceFound(mac, displayName, rssi);
                 }
-                if (!match) return;
+                return;
             }
 
-            String mac = result.getDevice().getAddress();
-            int rssi = result.getRssi();
+            if (name == null || name.isEmpty()) return;
 
-            // 去重：同一 mac 只上报一次
+            if (isDfuDevice(name)) return;
+
+            if (validNames != null && !validNames.isEmpty()
+                    && !validNames.contains(name)) return;
+
             Integer prev = foundDevices.get(mac);
             if (prev == null) {
                 foundDevices.put(mac, rssi);
@@ -210,28 +264,38 @@ public class BleScanner {
 
         @Override
         public void onScanFailed(int errorCode) {
+            // ★ 关键诊断：扫描失败时的错误码
+            String reason;
+            switch (errorCode) {
+                case ScanCallback.SCAN_FAILED_ALREADY_STARTED:
+                    reason = "ALREADY_STARTED"; break;
+                case ScanCallback.SCAN_FAILED_APPLICATION_REGISTRATION_FAILED:
+                    reason = "APP_REGISTRATION_FAILED"; break;
+                case ScanCallback.SCAN_FAILED_INTERNAL_ERROR:
+                    reason = "INTERNAL_ERROR"; break;
+                case ScanCallback.SCAN_FAILED_FEATURE_UNSUPPORTED:
+                    reason = "FEATURE_UNSUPPORTED"; break;
+                case ScanCallback.SCAN_FAILED_OUT_OF_HARDWARE_RESOURCES:
+                    reason = "OUT_OF_HARDWARE_RESOURCES"; break;
+                case ScanCallback.SCAN_FAILED_SCANNING_TOO_FREQUENTLY:
+                    reason = "SCANNING_TOO_FREQUENTLY"; break;
+                default:
+                    reason = "UNKNOWN(" + errorCode + ")"; break;
+            }
+            Log.e(TAG, "!!! onScanFailed: errorCode=" + errorCode + " (" + reason + ")");
+
+            long elapsed = System.currentTimeMillis() - scanStartTime;
+            Log.e(TAG, "!!! scan failed after " + elapsed + "ms, callbacks before fail: " + callbackCount);
+
             scanning = false;
             activeScanner = null;
-            String reason = describeErrorCode(errorCode);
-            callback.onError("扫描失败: " + reason);
+            callback.onError("扫描失败: " + reason + " (错误码=" + errorCode + ")");
         }
     }
 
-    /** 将 Android 原生错误码翻译为可读原因 */
-    private static String describeErrorCode(int errorCode) {
-        switch (errorCode) {
-            case android.bluetooth.le.ScanCallback.SCAN_FAILED_ALREADY_STARTED:
-                return "扫描已在进行中";
-            case android.bluetooth.le.ScanCallback.SCAN_FAILED_INTERNAL_ERROR:
-                return "蓝牙内部错误，请重试或重启蓝牙";
-            case android.bluetooth.le.ScanCallback.SCAN_FAILED_FEATURE_UNSUPPORTED:
-                return "本机不支持 BLE 扫描";
-            case android.bluetooth.le.ScanCallback.SCAN_FAILED_OUT_OF_HARDWARE_RESOURCES:
-                return "硬件资源不足，请稍后重试";
-            case android.bluetooth.le.ScanCallback.SCAN_FAILED_SCANNING_TOO_FREQUENTLY:
-                return "扫描过于频繁，请稍后重试";
-            default:
-                return "未知错误码 " + errorCode;
-        }
+    static boolean isDfuDevice(String name) {
+        return DFU_TAG.equals(name)
+                || name.startsWith(DFU_PREFIX)
+                || name.contains(DFU_PREFIX);
     }
 }

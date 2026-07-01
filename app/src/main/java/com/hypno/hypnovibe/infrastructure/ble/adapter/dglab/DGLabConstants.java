@@ -116,6 +116,9 @@ final class DGLabConstants {
     /** 重连间隔: 1s / 3s / 5s */
     static final long[] RETRY_DELAYS_MS = {1000L, 3000L, 5000L};
 
+    /** GATT 连接超时: 15000ms（对齐官方 timeout(15000)） */
+    static final long CONNECT_TIMEOUT_MS = 15000;
+
     // ===== BF 默认值 =====
 
     /** 软上限默认值: 200（不限制） */

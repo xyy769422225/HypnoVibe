@@ -2,6 +2,10 @@ package com.hypno.hypnovibe.domain.entity;
 
 import java.util.*;
 
+/**
+ * @deprecated 由 Playlist.ChannelMappingEntry 替代（Phase 5 通道体系重构）
+ */
+@Deprecated
 public class ChannelMapping {
     private String physicalChannelKey;
     private String deviceAlias;

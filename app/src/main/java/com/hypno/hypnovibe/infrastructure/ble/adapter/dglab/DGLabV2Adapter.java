@@ -1,5 +1,6 @@
 package com.hypno.hypnovibe.infrastructure.ble.adapter.dglab;
 
+import android.annotation.SuppressLint;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
@@ -37,7 +38,8 @@ public class DGLabV2Adapter implements DeviceProtocolAdapter, DGLabController {
     private static final UUID UUID_PWM_A34 = UUID.fromString(DGLabConstants.CHAR_PWM_A34);
     private static final UUID UUID_PWM_B34 = UUID.fromString(DGLabConstants.CHAR_PWM_B34);
 
-    private static final int STRENGTH_SCALE = 7;
+    /** 强度缩放系数：官方 packageStrengthBytesOld 中为 strA * 10 */
+    private static final int STRENGTH_SCALE = 10;
 
     private final String deviceId;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -63,11 +65,17 @@ public class DGLabV2Adapter implements DeviceProtocolAdapter, DGLabController {
 
     private String lastAddress;
     private Context lastContext;
-    private int retryCount = 0;
-    private static final int MAX_RETRIES = 3;
-    private static final long[] RETRY_DELAYS = DGLabConstants.RETRY_DELAYS_MS;
+    private Runnable connectTimeoutTask;
 
     private DGLabController.DGLabListener dglabListener;
+
+    // === 波形播放模式 ===
+    private volatile boolean waveModeA = false;
+    private volatile int waveFreqA = 10;
+    private volatile int waveStrengthA = 0;
+    private volatile boolean waveModeB = false;
+    private volatile int waveFreqB = 10;
+    private volatile int waveStrengthB = 0;
 
     public DGLabV2Adapter(String deviceId) {
         this.deviceId = deviceId;
@@ -82,7 +90,6 @@ public class DGLabV2Adapter implements DeviceProtocolAdapter, DGLabController {
         this.context = lastContext;
         this.lastAddress = address;
         this.statusCallback = status;
-        this.retryCount = 0;
         notifyStatus(AdapterStatus.State.CONNECTING, "开始连接: " + address);
         try {
             BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
@@ -91,6 +98,18 @@ public class DGLabV2Adapter implements DeviceProtocolAdapter, DGLabController {
                 return;
             }
             BluetoothDevice device = adapter.getRemoteDevice(address);
+            // 连接超时看门狗：对齐官方 timeout(15000)
+            cancelConnectTimeout();
+            connectTimeoutTask = () -> {
+                if (!connected && gatt != null) {
+                    Log.w(TAG, "connection timeout");
+                    try { gatt.disconnect(); gatt.close(); } catch (Exception ignored) {}
+                    gatt = null;
+                    notifyStatus(AdapterStatus.State.ERROR, "连接超时");
+                    if (dglabListener != null) dglabListener.onDisconnected();
+                }
+            };
+            mainHandler.postDelayed(connectTimeoutTask, 15000);
             gatt = device.connectGatt(context, false, gattCallback);
         } catch (SecurityException e) {
             notifyStatus(AdapterStatus.State.ERROR, "缺少蓝牙权限");
@@ -101,7 +120,7 @@ public class DGLabV2Adapter implements DeviceProtocolAdapter, DGLabController {
 
     @Override
     public void disconnect() {
-        retryCount = MAX_RETRIES;
+        cancelConnectTimeout();
         stopTimer();
         connected = false;
         safetyOn = true;
@@ -139,6 +158,28 @@ public class DGLabV2Adapter implements DeviceProtocolAdapter, DGLabController {
     }
 
     @Override
+    public void sendChannelWaveFrame(int channel, int frequency, int strength) {
+        // V2 波形: 频率 → X/Y, 强度 → Z
+        int freq = Math.max(10, Math.min(frequency, 240));
+        int str = Math.round((float) Math.max(0, Math.min(strength, 200)) * 7f / 200f);
+        if (channel == 0) {
+            waveModeA = true;
+            waveFreqA = freq;
+            waveStrengthA = Math.min(str, 31);
+        } else {
+            waveModeB = true;
+            waveFreqB = freq;
+            waveStrengthB = Math.min(str, 31);
+        }
+    }
+
+    @Override
+    public void sendSilentFrame() {
+        waveModeA = false;
+        waveModeB = false;
+    }
+
+    @Override
     public void emergencyStop() {
         targetStrengthA = 0; targetStrengthB = 0;
         deviceStrengthA = 0; deviceStrengthB = 0;
@@ -156,24 +197,21 @@ public class DGLabV2Adapter implements DeviceProtocolAdapter, DGLabController {
         @Override
         public void onConnectionStateChange(BluetoothGatt g, int status, int newState) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
+                cancelConnectTimeout();
                 connected = true;
-                retryCount = 0;
                 notifyStatus(AdapterStatus.State.CONNECTED, "GATT 已连接, 发现服务中...");
+                // 对齐官方：无 requestMtu，直接 discoverServices
                 try { g.discoverServices(); } catch (SecurityException e) {
                     notifyStatus(AdapterStatus.State.ERROR, "发现服务失败");
                 }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                cancelConnectTimeout();
                 connected = false;
                 safetyOn = true;
                 stopTimer();
-                if (retryCount < MAX_RETRIES && !released) {
-                    notifyStatus(AdapterStatus.State.RETRYING,
-                            "连接断开, 第" + (retryCount + 1) + "次重试...");
-                    scheduleRetry();
-                } else {
-                    notifyStatus(AdapterStatus.State.DISCONNECTED, "连接已断开");
-                    if (dglabListener != null) dglabListener.onDisconnected();
-                }
+                // 对齐官方：retry(0)，不重试，直接断开
+                notifyStatus(AdapterStatus.State.DISCONNECTED, "连接已断开");
+                if (dglabListener != null) dglabListener.onDisconnected();
             }
         }
 
@@ -233,6 +271,26 @@ public class DGLabV2Adapter implements DeviceProtocolAdapter, DGLabController {
 
     private void onTimerTick() {
         if (!connected || gatt == null) return;
+
+        // 波形模式：频率 → X/Y, 强度 → Z, 直接写入波形特性
+        if (waveModeA || waveModeB) {
+            int x = 1, y = 99, z = 0;
+            if (waveModeA) {
+                y = waveFreqA - 1;
+                z = waveStrengthA;
+            }
+            int xb = 1, yb = 99, zb = 0;
+            if (waveModeB) {
+                yb = waveFreqB - 1;
+                zb = waveStrengthB;
+            }
+            try {
+                if (charA34 != null) { charA34.setValue(DGLabV2Protocol.buildPwmA34(xb, yb > 0 ? yb : 1, zb)); gatt.writeCharacteristic(charA34); }
+                if (charB34 != null) { charB34.setValue(DGLabV2Protocol.buildPwmB34(x, y > 0 ? y : 1, z)); gatt.writeCharacteristic(charB34); }
+            } catch (SecurityException ignored) {}
+            return;
+        }
+
         byte[] cmdA34 = DGLabV2Protocol.buildPwmA34(1, 99, 0);
         byte[] cmdB34 = DGLabV2Protocol.buildPwmB34(1, 99, 0);
         try {
@@ -242,18 +300,11 @@ public class DGLabV2Adapter implements DeviceProtocolAdapter, DGLabController {
         } catch (SecurityException ignored) {}
     }
 
-    private void scheduleRetry() {
-        if (retryCount >= MAX_RETRIES) {
-            if (statusCallback != null)
-                statusCallback.onFatalError(deviceId, "重连失败，已重试" + MAX_RETRIES + "次");
-            return;
+    private void cancelConnectTimeout() {
+        if (connectTimeoutTask != null) {
+            mainHandler.removeCallbacks(connectTimeoutTask);
+            connectTimeoutTask = null;
         }
-        long delay = RETRY_DELAYS[retryCount];
-        retryCount++;
-        mainHandler.postDelayed(() -> {
-            if (lastAddress != null && lastContext != null && !connected && !released)
-                connect(lastContext, lastAddress, statusCallback);
-        }, delay);
     }
 
     private void notifyStatus(AdapterStatus.State state, String detail) {

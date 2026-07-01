@@ -87,6 +87,14 @@ public class DGLabV3Adapter implements DeviceProtocolAdapter, DGLabController {
     private volatile TimelineEngine.KeyframeResult cachedKfB;
     private volatile boolean coordinatorActive = false; // true = Coordinator 驱动，false = 手动测试面板
 
+    // === BF 参数（连接时写入，可运行时更新） ===
+    private volatile int bfSoftLimitA = 200;
+    private volatile int bfSoftLimitB = 200;
+    private volatile int bfBalance1A = 160;
+    private volatile int bfBalance1B = 160;
+    private volatile int bfBalance2A = 0;
+    private volatile int bfBalance2B = 0;
+
     public DGLabV3Adapter(String deviceId) {
         this.deviceId = deviceId;
     }
@@ -195,6 +203,27 @@ public class DGLabV3Adapter implements DeviceProtocolAdapter, DGLabController {
     }
 
     @Override
+    public void updateBfParams(int softLimitA, int softLimitB,
+                                int balance1A, int balance1B,
+                                int balance2A, int balance2B) {
+        bfSoftLimitA = clamp(softLimitA, 0, 200);
+        bfSoftLimitB = clamp(softLimitB, 0, 200);
+        bfBalance1A = clamp(balance1A, 0, 255);
+        bfBalance1B = clamp(balance1B, 0, 255);
+        bfBalance2A = clamp(balance2A, 0, 255);
+        bfBalance2B = clamp(balance2B, 0, 255);
+
+        // 已连接则立即写入设备
+        if (connected && gatt != null && writeChar != null) {
+            byte[] bf = DGLabB0Builder.buildBF(
+                bfSoftLimitA, bfSoftLimitB,
+                bfBalance1A, bfBalance1B,
+                bfBalance2A, bfBalance2B);
+            writeCharacteristic(bf);
+        }
+    }
+
+    @Override
     public boolean validateSegmentData(byte[] protobufBytes) {
         return false;
     }
@@ -290,7 +319,10 @@ public class DGLabV3Adapter implements DeviceProtocolAdapter, DGLabController {
 
             mainHandler.postDelayed(() -> {
                 if (released || gatt == null) return;
-                byte[] bf = DGLabB0Builder.buildDefaultBF();
+                byte[] bf = DGLabB0Builder.buildBF(
+                    bfSoftLimitA, bfSoftLimitB,
+                    bfBalance1A, bfBalance1B,
+                    bfBalance2A, bfBalance2B);
                 writeChar.setValue(bf);
                 gatt.writeCharacteristic(writeChar);
 
@@ -393,11 +425,10 @@ public class DGLabV3Adapter implements DeviceProtocolAdapter, DGLabController {
         writeCharacteristic(cmd);
     }
 
-    /** 波形模式下的 B0 发送：不改变通道强度，只更新波形数据 */
+    /** 波形模式下的 B0 发送：同步波形数据 + 强度变化时触发 B1 回报 */
     private void sendWaveModeB0() {
         int[] aw = waveDataA;
         int[] bw = waveDataB;
-        // 波形模式下打包频率和强度为 8 字节波形数据
         if (waveModeA) {
             aw = DGLabB0Builder.packWaveData(
                 new int[]{waveFreqA, waveFreqA, waveFreqA, waveFreqA},
@@ -408,12 +439,25 @@ public class DGLabV3Adapter implements DeviceProtocolAdapter, DGLabController {
                 new int[]{waveFreqB, waveFreqB, waveFreqB, waveFreqB},
                 new int[]{waveStrengthB, waveStrengthB, waveStrengthB, waveStrengthB});
         }
-        // 不修改强度，纯波形输出
-        byte[] cmd = DGLabB0Builder.buildB0(
-            false, 0,
-            DGLabB0Builder.MODE_UNCHANGED, DGLabB0Builder.MODE_UNCHANGED,
-            0, 0, aw, bw);
-        writeCharacteristic(cmd);
+
+        boolean needA = targetStrengthA != deviceStrengthA;
+        boolean needB = targetStrengthB != deviceStrengthB;
+        if (needA || needB) {
+            // 强度有变化：发送 ABSOLUTE 让设备回报 B1
+            int modeA = needA ? DGLabB0Builder.MODE_ABSOLUTE : DGLabB0Builder.MODE_UNCHANGED;
+            int modeB = needB ? DGLabB0Builder.MODE_ABSOLUTE : DGLabB0Builder.MODE_UNCHANGED;
+            byte[] cmd = DGLabB0Builder.buildB0(
+                true, nextSeqNo(), modeA, modeB,
+                targetStrengthA, targetStrengthB, aw, bw);
+            writeCharacteristic(cmd);
+        } else {
+            // 强度无变化，纯波形输出
+            byte[] cmd = DGLabB0Builder.buildB0(
+                false, 0,
+                DGLabB0Builder.MODE_UNCHANGED, DGLabB0Builder.MODE_UNCHANGED,
+                0, 0, aw, bw);
+            writeCharacteristic(cmd);
+        }
     }
 
     @SuppressLint("MissingPermission")

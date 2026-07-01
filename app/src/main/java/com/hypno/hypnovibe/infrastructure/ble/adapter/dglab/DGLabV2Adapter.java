@@ -217,6 +217,13 @@ public class DGLabV2Adapter implements DeviceProtocolAdapter, DGLabController {
         }
     }
 
+    @Override
+    public void updateBfParams(int softLimitA, int softLimitB,
+                                int balance1A, int balance1B,
+                                int balance2A, int balance2B) {
+        // V2 不支持 BF 参数，空实现
+    }
+
     private final BluetoothGattCallback gattCallback = new BluetoothGattCallback() {
         @Override
         public void onConnectionStateChange(BluetoothGatt g, int status, int newState) {

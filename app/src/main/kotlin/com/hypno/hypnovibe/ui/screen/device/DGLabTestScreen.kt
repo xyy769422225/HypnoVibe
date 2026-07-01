@@ -3,12 +3,13 @@ package com.hypno.hypnovibe.ui.screen.device
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -62,7 +63,15 @@ fun DGLabTestScreen(deviceId: String, navController: NavController) {
     val progressA by testVm.getProgressA().collectAsState()
     val progressB by testVm.getProgressB().collectAsState()
 
+    val softLimitA by testVm.getSoftLimitA().collectAsState()
+    val softLimitB by testVm.getSoftLimitB().collectAsState()
+    val bal1A by testVm.getBalance1A().collectAsState()
+    val bal1B by testVm.getBalance1B().collectAsState()
+    val bal2A by testVm.getBalance2A().collectAsState()
+    val bal2B by testVm.getBalance2B().collectAsState()
+
     var tabIndex by remember { mutableIntStateOf(0) }
+    var showBfSettings by remember { mutableStateOf(false) }
 
     LaunchedEffect(deviceId) {
         val connected = deviceVm.findDevice(deviceId)
@@ -142,6 +151,16 @@ fun DGLabTestScreen(deviceId: String, navController: NavController) {
                     unselectedContentColor = DarkGray)
             }
 
+            // BF 参数调节（可折叠）
+            BfSettingsSection(
+                testVm = testVm,
+                showBfSettings = showBfSettings,
+                onToggle = { showBfSettings = !showBfSettings },
+                softLimitA = softLimitA, softLimitB = softLimitB,
+                bal1A = bal1A, bal1B = bal1B,
+                bal2A = bal2A, bal2B = bal2B
+            )
+
             when (tabIndex) {
                 0 -> ChannelTabA(testVm, targetA, deviceA, channelAEnabled,
                     waveforms, selectedWaveA, playingA, progressA)
@@ -149,6 +168,115 @@ fun DGLabTestScreen(deviceId: String, navController: NavController) {
                     waveforms, selectedWaveB, playingB, progressB)
             }
         }
+    }
+}
+
+/**
+ * BF 参数调节面板（可折叠）。
+ * 软上限 0-200，平衡参数 0-255。修改后立即持久化并写入设备。
+ */
+@Composable
+private fun BfSettingsSection(
+    testVm: DGLabTestVM,
+    showBfSettings: Boolean,
+    onToggle: () -> Unit,
+    softLimitA: Int, softLimitB: Int,
+    bal1A: Int, bal1B: Int,
+    bal2A: Int, bal2B: Int
+) {
+    Column {
+        // 折叠/展开按钮
+        StoneCard(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).clickable { onToggle() }
+        ) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "BF 参数设置",
+                    color = GoldAncient,
+                    style = MaterialTheme.typography.titleSmall
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    if (showBfSettings) "▲ 收起" else "▼ 展开",
+                    color = SilverGray,
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+        }
+
+        AnimatedVisibility(
+            visible = showBfSettings,
+            enter = expandVertically(),
+            exit = shrinkVertically()
+        ) {
+            Column(
+                modifier = Modifier.padding(horizontal = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // 软上限
+                Text("通道强度软上限", color = SilverGray, style = MaterialTheme.typography.labelMedium)
+                BfSliderRow("A通道上限", softLimitA, 0..200, "200") { testVm.setSoftLimitA(it) }
+                BfSliderRow("B通道上限", softLimitB, 0..200, "200") { testVm.setSoftLimitB(it) }
+
+                GothicDivider()
+
+                // 频率平衡参数 1
+                Text("频率平衡参数 1（低频冲击感）", color = SilverGray, style = MaterialTheme.typography.labelMedium)
+                BfSliderRow("A通道", bal1A, 0..255, "255") { testVm.setBalance1A(it) }
+                BfSliderRow("B通道", bal1B, 0..255, "255") { testVm.setBalance1B(it) }
+
+                GothicDivider()
+
+                // 频率平衡参数 2
+                Text("频率平衡参数 2（低频刺激感）", color = SilverGray, style = MaterialTheme.typography.labelMedium)
+                BfSliderRow("A通道", bal2A, 0..255, "255") { testVm.setBalance2A(it) }
+                BfSliderRow("B通道", bal2B, 0..255, "255") { testVm.setBalance2B(it) }
+
+                Spacer(Modifier.height(8.dp))
+            }
+        }
+    }
+}
+
+/** BF 单行滑条 */
+@Composable
+private fun BfSliderRow(
+    label: String,
+    value: Int,
+    range: IntRange,
+    maxLabel: String,
+    onValueChange: (Int) -> Unit
+) {
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            label,
+            color = DarkGray,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.width(72.dp)
+        )
+        Slider(
+            value = value.toFloat(),
+            onValueChange = { onValueChange(it.toInt()) },
+            valueRange = range.first.toFloat()..range.last.toFloat(),
+            modifier = Modifier.weight(1f),
+            colors = SliderDefaults.colors(
+                thumbColor = GoldAncient,
+                activeTrackColor = GoldAncient,
+                inactiveTrackColor = LeatherBrown
+            )
+        )
+        Text(
+            "$value/$maxLabel",
+            color = SilverGray,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.width(56.dp)
+        )
     }
 }
 
@@ -207,23 +335,29 @@ private fun ChannelTabA(
                         )
                         Spacer(Modifier.width(8.dp))
                         Column(Modifier.weight(1f)) {
-                            LinearProgressIndicator(
-                                progress = target / 200f,
-                                modifier = Modifier.fillMaxWidth().height(6.dp),
-                                color = BloodRed,
-                                trackColor = LeatherBrown
+                            Slider(
+                                value = target.toFloat(),
+                                onValueChange = { testVm.setStrengthA(it.toInt()) },
+                                valueRange = 0f..200f,
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = SliderDefaults.colors(
+                                    thumbColor = BloodRed,
+                                    activeTrackColor = BloodRed,
+                                    inactiveTrackColor = LeatherBrown
+                                )
                             )
-                            Spacer(Modifier.height(2.dp))
-                            Text(
-                                "$target/200",
-                                color = SilverGray,
-                                style = MaterialTheme.typography.labelMedium
-                            )
-                            Text(
-                                "回报: $device",
-                                color = DarkGray,
-                                style = MaterialTheme.typography.labelSmall
-                            )
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text(
+                                    "$target/200",
+                                    color = SilverGray,
+                                    style = MaterialTheme.typography.labelMedium
+                                )
+                                Text(
+                                    "回报: $device",
+                                    color = DarkGray,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
                         }
                         Spacer(Modifier.width(8.dp))
                         AccelHoldButton(
@@ -305,23 +439,29 @@ private fun ChannelTabB(
                         )
                         Spacer(Modifier.width(8.dp))
                         Column(Modifier.weight(1f)) {
-                            LinearProgressIndicator(
-                                progress = target / 200f,
-                                modifier = Modifier.fillMaxWidth().height(6.dp),
-                                color = BloodRed,
-                                trackColor = LeatherBrown
+                            Slider(
+                                value = target.toFloat(),
+                                onValueChange = { testVm.setStrengthB(it.toInt()) },
+                                valueRange = 0f..200f,
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = SliderDefaults.colors(
+                                    thumbColor = BloodRed,
+                                    activeTrackColor = BloodRed,
+                                    inactiveTrackColor = LeatherBrown
+                                )
                             )
-                            Spacer(Modifier.height(2.dp))
-                            Text(
-                                "$target/200",
-                                color = SilverGray,
-                                style = MaterialTheme.typography.labelMedium
-                            )
-                            Text(
-                                "回报: $device",
-                                color = DarkGray,
-                                style = MaterialTheme.typography.labelSmall
-                            )
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text(
+                                    "$target/200",
+                                    color = SilverGray,
+                                    style = MaterialTheme.typography.labelMedium
+                                )
+                                Text(
+                                    "回报: $device",
+                                    color = DarkGray,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
                         }
                         Spacer(Modifier.width(8.dp))
                         AccelHoldButton(
@@ -349,7 +489,8 @@ private fun ChannelTabB(
 }
 
 /**
- * 加速长按按钮：点击变化1，按住从每秒+1逐渐加速到每秒+5。
+ * 加速长按按钮：点击变化1，按住500ms后开始重复，
+ * 从500ms/次逐渐加速到200ms/次（约3秒内达到最快速度）。
  */
 @Composable
 private fun AccelHoldButton(
@@ -369,16 +510,20 @@ private fun AccelHoldButton(
                 onPress = {
                     pressed = true
                     onChange()
-                    // 初始等待 600ms 后开始重复
-                    val released = withTimeoutOrNull(600) { tryAwaitRelease(); true }
+                    // 初始等待 500ms 后开始重复
+                    val released = withTimeoutOrNull(500) { tryAwaitRelease(); true }
                     if (released == null) {
-                        // 从 1000ms 逐渐加速到 200ms（最快每秒5次）
                         val job = scope.launch(Dispatchers.Default) {
-                            var delayMs = 1000L
+                            val startTime = System.currentTimeMillis()
+                            val initialDelay = 500L
+                            val minDelay = 200L
+                            val rampDuration = 3000L // 3秒内加速到最快
                             while (isActive && pressed) {
+                                val elapsed = System.currentTimeMillis() - startTime
+                                val progress = (elapsed.toFloat() / rampDuration).coerceIn(0f, 1f)
+                                val delayMs = (initialDelay - (initialDelay - minDelay) * progress).toLong()
                                 onChange()
                                 delay(delayMs)
-                                delayMs = maxOf(200L, delayMs - 50L)
                             }
                         }
                         tryAwaitRelease()
@@ -425,10 +570,10 @@ private fun ChannelWaveformList(
         )
     }
 
-    LazyColumn(
+    Column(
         verticalArrangement = Arrangement.spacedBy(2.dp)
     ) {
-        itemsIndexed(waveforms) { idx, wave ->
+        waveforms.forEachIndexed { idx, wave ->
             val isSelected = idx == selectedIdx
             val isActive = isSelected && playing
             CompactWaveItem(

@@ -33,6 +33,11 @@ public interface DGLabController {
     /** 紧急停止：强度归零 */
     void emergencyStop();
 
+    /** 更新 BF 参数（软上限 + 平衡参数），立即写入设备 */
+    void updateBfParams(int softLimitA, int softLimitB,
+                        int balance1A, int balance1B,
+                        int balance2A, int balance2B);
+
     /** 设置测试面板回调 */
     void setDGLabListener(DGLabListener listener);
 

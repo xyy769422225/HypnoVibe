@@ -113,9 +113,9 @@ final class DGLabB0Builder {
         };
     }
 
-    /** 默认 BF 配置：不限制软上限，中性平衡 */
+    /** 默认 BF 配置：不限制软上限，balance1=160, balance2=0 */
     static byte[] buildDefaultBF() {
-        return buildBF(200, 200, 128, 128, 128, 128);
+        return buildBF(200, 200, 160, 160, 0, 0);
     }
 
     /** 默认波形数据 8 字节（对齐官方 combinedData$default） */

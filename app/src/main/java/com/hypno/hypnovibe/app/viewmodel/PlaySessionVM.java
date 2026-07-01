@@ -6,9 +6,11 @@ import android.util.Log;
 import androidx.lifecycle.AndroidViewModel;
 import com.hypno.hypnovibe.app.manager.ChannelMappingCoordinator;
 import com.hypno.hypnovibe.app.manager.DeviceTypeRegistry;
+import com.hypno.hypnovibe.app.manager.PlaybackCoordinator;
 import com.hypno.hypnovibe.app.manager.PlaylistManager;
 import com.hypno.hypnovibe.app.manager.TimelineEngine;
 import com.hypno.hypnovibe.app.manager.TimelineManager;
+import com.hypno.hypnovibe.domain.entity.ConnectedDevice;
 import com.hypno.hypnovibe.domain.entity.Playlist;
 import com.hypno.hypnovibe.domain.entity.TimelineScript;
 import com.hypno.hypnovibe.domain.repository.IPlaylistRepository;
@@ -45,10 +47,13 @@ public class PlaySessionVM extends AndroidViewModel {
     private ChannelMappingCoordinator channelMappingCoordinator;
     private TimelineEngine timelineEngine;
 
+    // ── Phase 6: PlaybackCoordinator ──
+    private final PlaybackCoordinator playbackCoordinator;
+
     /**
-     * 位置更新监听器，供后续 PlaybackCoordinator 接入驱动设备链路。
+     * 位置更新监听器，供 PlaybackCoordinator 接入驱动设备链路。
      * positionPoller 每 ~33ms 调用一次，传入当前音频播放位置。
-     * 后续 Phase 5/6 实现 Coordinator 后注入即可，无需改动 positionPoller。
+     * Phase 6: PlaybackCoordinator 已注入，完整链路已打通。
      */
     public interface PositionListener {
         void onPositionUpdate(long positionMs);
@@ -79,6 +84,9 @@ public class PlaySessionVM extends AndroidViewModel {
         this.manager = new PlaylistManager(new PlaylistRepo(jsonRepo));
         this.timelineManager = new TimelineManager(new JsonFileRepository(app, "timelines"));
         this.channelMappingCoordinator = new ChannelMappingCoordinator(new DeviceTypeRegistry());
+        // Phase 6: 创建 PlaybackCoordinator 并注入为 PositionListener
+        this.playbackCoordinator = new PlaybackCoordinator(channelMappingCoordinator);
+        setPositionListener(playbackCoordinator);
     }
 
     // ── StateFlow getters ──
@@ -109,6 +117,30 @@ public class PlaySessionVM extends AndroidViewModel {
             String storedPath = persistToInternal(audioPath, title);
             Playlist p = manager.addTrack(playlistId, storedPath, title, durationMs);
             if (p != null) {
+                // Phase 6: 自动匹配同文件夹的 .hvscript
+                Playlist.Track newTrack = p.getTracks().get(p.getTracks().size() - 1);
+                String scriptPath = PlaylistManager.autoMatchScript(newTrack);
+                if (scriptPath != null) {
+                    newTrack.setTimelineScriptPath(scriptPath);
+                    newTrack.setAutoMatched(true);
+                    // 校验 configId 匹配
+                    TimelineScript script = timelineManager.load(scriptPath);
+                    if (script != null) {
+                        String err = manager.validateConfigMatch(p, script);
+                        if (err != null) {
+                            // configId 不匹配，清除脚本关联
+                            newTrack.setTimelineScriptPath(null);
+                            newTrack.setAutoMatched(false);
+                            Log.w(TAG, "autoMatch rejected: " + err);
+                        } else {
+                            // 检查时长匹配
+                            boolean match = manager.checkDurationMatch(newTrack, script);
+                            newTrack.setHasMismatch(!match);
+                            newTrack.setScriptDurationMs(script.getTotalDurationMs());
+                        }
+                    }
+                    manager.save(p);
+                }
                 currentPlaylist.setValue(p);
                 pendingReload = true;
             }
@@ -116,6 +148,7 @@ public class PlaySessionVM extends AndroidViewModel {
     }
 
     public void removeTrack(String playlistId, String trackId) { Playlist p = manager.removeTrack(playlistId, trackId); if (p != null) currentPlaylist.setValue(p); }
+    public void reorderTrack(String playlistId, int from, int to) { manager.reorderTracks(playlistId, from, to); Playlist p = manager.findById(playlistId); if (p != null) currentPlaylist.setValue(p); }
     public void setPlayMode(String mode) { Playlist p = currentPlaylist.getValue(); if (p != null) { p.setPlayMode(mode); manager.save(p); currentPlaylist.setValue(p); } }
     public void renamePlaylist(String id, String newName) { Playlist p = manager.findById(id); if (p != null) { manager.rename(p, newName); loadPlaylists(); } }
     public void deletePlaylist(String id) {
@@ -237,6 +270,8 @@ public class PlaySessionVM extends AndroidViewModel {
         if (audioEngine != null) {
             audioEngine.seek(ms);
             positionMs.setValue(ms);
+            // Phase 6: seek 时刷新所有 Adapter，下一 tick 用新位置数据覆盖
+            playbackCoordinator.seekNotify();
         }
     }
 
@@ -299,6 +334,8 @@ public class PlaySessionVM extends AndroidViewModel {
             positionPoller.shutdownNow();
             positionPoller = null;
         }
+        // Phase 6: 停止时所有设备归零
+        playbackCoordinator.stopAll();
     }
 
     // ══════════════════════════════════════════════════════
@@ -321,6 +358,9 @@ public class PlaySessionVM extends AndroidViewModel {
             }
         }
         this.timelineEngine = engine;
+        // Phase 6: 同步 coordinator 的引擎和通道映射
+        playbackCoordinator.setTimelineEngine(engine);
+        playbackCoordinator.setChannelMapping(playlist.getChannelMapping());
         Log.d(TAG, "preloadAll: " + engine.getChannelCount() + " channels indexed");
     }
 
@@ -358,10 +398,31 @@ public class PlaySessionVM extends AndroidViewModel {
             return;
         }
         manager.setChannelMapping(playlistId, mapping);
+        // Phase 6: 同步 coordinator 的映射
+        playbackCoordinator.setChannelMapping(mapping);
         Playlist pl = currentPlaylist.getValue();
         if (pl != null && pl.getId().equals(playlistId)) {
             currentPlaylist.setValue(manager.findById(playlistId));
         }
+    }
+
+    // ══════════════════════════════════════════════════════
+    //  Phase 6: 设备生命周期（供 DeviceManagerVM 调用）
+    // ══════════════════════════════════════════════════════
+
+    /** 设备连接成功时，注册到 PlaybackCoordinator */
+    public void onDeviceConnected(ConnectedDevice device) {
+        playbackCoordinator.registerDevice(device);
+    }
+
+    /** 设备断开时，从 PlaybackCoordinator 注销 */
+    public void onDeviceDisconnected(String mac) {
+        playbackCoordinator.unregisterDevice(mac);
+    }
+
+    /** 获取 PlaybackCoordinator（供 DeviceManagerVM 等外部组件访问） */
+    public PlaybackCoordinator getPlaybackCoordinator() {
+        return playbackCoordinator;
     }
 
     // ══════════════════════════════════════════════════════
@@ -413,6 +474,8 @@ public class PlaySessionVM extends AndroidViewModel {
         stopPositionPoller();
         ioExecutor.shutdownNow();
         if (audioEngine != null) { audioEngine.release(); audioEngine = null; }
+        // Phase 6: 清理 coordinator
+        playbackCoordinator.clearAll();
     }
 
     static class PlaylistRepo implements IPlaylistRepository {

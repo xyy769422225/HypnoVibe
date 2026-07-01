@@ -1,10 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="purple_200">#FFBB86FC</color>
-    <color name="purple_500">#FF6200EE</color>
-    <color name="purple_700">#FF3700B3</color>
-    <color name="teal_200">#FF03DAC5</color>
-    <color name="teal_700">#FF018786</color>
+    <!-- Dark Dungeon 色彩体系 -->
+    <color name="abyss_black">#FF0D0D0D</color>
+    <color name="dark_stone_brown">#FF1A1410</color>
+    <color name="stone_gray">#FF231F1A</color>
+    <color name="dark_copper">#FF3A2A1A</color>
+    <color name="blood_red">#FF8B0000</color>
+    <color name="gold_ancient">#FFD4A574</color>
+    <color name="dark_purple">#FF7B68EE</color>
+    <color name="leather_brown">#FF6B4423</color>
+    <color name="silver_gray">#FFC0C0C0</color>
+    <color name="dark_gray">#FF808080</color>
+    <color name="alert_red">#FFFF4444</color>
+    <color name="dark_green">#FF006400</color>
+
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
 </resources>

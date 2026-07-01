@@ -2,13 +2,14 @@ package com.hypno.hypnovibe.ui.screen.playlist
 
 import android.media.MediaMetadataRetriever
 import android.provider.OpenableColumns
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -22,11 +23,10 @@ import androidx.navigation.NavController
 import com.hypno.hypnovibe.app.viewmodel.PlaySessionVM
 import com.hypno.hypnovibe.ui.component.*
 import com.hypno.hypnovibe.ui.theme.*
-import com.hypno.hypnovibe.ui.navigation.Screen
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun PlaylistDetailScreen(playlistId: String, navController: NavController) {
     val activity = LocalContext.current as ComponentActivity
@@ -36,8 +36,18 @@ fun PlaylistDetailScreen(playlistId: String, navController: NavController) {
     val isPlaying by vm.getIsPlayingState().collectAsState()
     val context = LocalContext.current
 
+    // ── 时长不匹配详情弹窗状态 ──
+    var mismatchDialogTrack by remember { mutableStateOf<com.hypno.hypnovibe.domain.entity.Playlist.Track?>(null) }
+
+    // ── 手动选择时间轴脚本弹窗状态 ──
+    var scriptPickerTrack by remember { mutableStateOf<com.hypno.hypnovibe.domain.entity.Playlist.Track?>(null) }
+
+    // ── configId 不匹配警告弹窗 ──
+    var configMismatchMsg by remember { mutableStateOf<String?>(null) }
+
     LaunchedEffect(playlistId) { vm.openPlaylist(playlistId) }
 
+    // 音频文件选择器
     val audioPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
@@ -61,6 +71,36 @@ fun PlaylistDetailScreen(playlistId: String, navController: NavController) {
         }
     }
 
+    // 时间轴脚本文件选择器
+    val scriptPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        scriptPickerTrack?.let { track ->
+            if (uri != null) {
+                val scriptPath = uri.toString()
+                // 校验 configId 匹配
+                val playlistConfigId = current?.configId
+                if (playlistConfigId != null) {
+                    try {
+                        val parser = org.json.JSONObject(
+                            context.contentResolver.openInputStream(uri)?.bufferedReader()?.readText() ?: ""
+                        )
+                        val scriptConfigId = parser.optString("configId", null)
+                        if (scriptConfigId != null && playlistConfigId != scriptConfigId) {
+                            configMismatchMsg = "时间轴脚本的配置 ID 与此播放列表不匹配，无法关联"
+                            scriptPickerTrack = null
+                            return@let
+                        }
+                    } catch (_: Exception) {}
+                }
+                vm.setTimelineScript(playlistId, track.trackId, scriptPath)
+                Toast.makeText(context, "已关联时间轴脚本", Toast.LENGTH_SHORT).show()
+            }
+            scriptPickerTrack = null
+        }
+    }
+
+    // ── Scaffold ──
     Scaffold(
         topBar = {
             TopAppBar(
@@ -72,7 +112,7 @@ fun PlaylistDetailScreen(playlistId: String, navController: NavController) {
                 },
                 actions = {
                     IconButton(onClick = {
-                        navController.navigate(Screen.ChannelMapping.route.replace("{playlistId}", playlistId))
+                        navController.navigate("channel_mapping/$playlistId")
                     }) {
                         Icon(Icons.Filled.Settings, "通道映射", tint = SilverGray)
                     }
@@ -106,52 +146,162 @@ fun PlaylistDetailScreen(playlistId: String, navController: NavController) {
                     Text("${tracks.size} 首曲目", color = SilverGray)
                     Spacer(Modifier.height(4.dp))
                 }
-                items(tracks, key = { it.trackId }) { track ->
-                    val index = tracks.indexOf(track)
+                itemsIndexed(tracks, key = { _, t -> t.trackId }) { index, track ->
                     val isCurrent = index == currentTrackIdx
+                    val isFirst = index == 0
+                    val isLast = index == tracks.size - 1
+
                     StoneCard {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { vm.playTrack(index) }
-                                .padding(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(8.dp)
                         ) {
-                            // 当前播放曲目：显示播放/暂停图标，用 BloodRed 高亮
-                            if (isCurrent) {
-                                Icon(
-                                    imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                                    contentDescription = if (isPlaying) "播放中" else "已暂停",
-                                    tint = BloodRed,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Spacer(Modifier.width(8.dp))
-                            }
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    track.audioTitle,
-                                    color = if (isCurrent) GoldAncient else SilverGray
-                                )
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    if (track.durationMs > 0) {
-                                        Text(
-                                            "${track.durationMs / 60000}:${String.format("%02d", (track.durationMs / 1000) % 60)}",
-                                            color = if (isCurrent) BloodRed else DarkGray
-                                        )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { vm.playTrack(index) },
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // 当前播放曲目：显示播放/暂停图标
+                                if (isCurrent) {
+                                    Icon(
+                                        imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                        contentDescription = if (isPlaying) "播放中" else "已暂停",
+                                        tint = BloodRed,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                }
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        track.audioTitle,
+                                        color = if (isCurrent) GoldAncient else SilverGray
+                                    )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        if (track.durationMs > 0) {
+                                            Text(
+                                                "${track.durationMs / 60000}:${String.format("%02d", (track.durationMs / 1000) % 60)}",
+                                                color = if (isCurrent) BloodRed else DarkGray
+                                            )
+                                        }
+                                        if (track.timelineScriptPath != null) Text("时间轴", color = DarkGreen)
+                                        else Text("无时间轴", color = DarkGray)
+                                        if (track.hasMismatch()) {
+                                            Text(
+                                                "⚠",
+                                                color = AlertRed,
+                                                modifier = Modifier.combinedClickable(
+                                                    onClick = {},
+                                                    onLongClick = { mismatchDialogTrack = track }
+                                                )
+                                            )
+                                        }
                                     }
-                                    if (track.timelineScriptPath != null) Text("时间轴", color = DarkGreen)
-                                    else Text("无时间轴", color = DarkGray)
-                                    if (track.hasMismatch()) Text("⚠", color = AlertRed)
+                                }
+                                // 手动选择时间轴脚本
+                                IconButton(
+                                    onClick = {
+                                        if (isPlaying) {
+                                            Toast.makeText(context, "请先暂停播放", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            scriptPickerTrack = track
+                                            scriptPicker.launch(arrayOf("*/*"))
+                                        }
+                                    }
+                                ) {
+                                    Icon(
+                                        Icons.Filled.MoreVert,
+                                        "选择时间轴",
+                                        tint = DarkGray,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                                IconButton(onClick = { vm.removeTrack(playlistId, track.trackId) }) {
+                                    Icon(Icons.Filled.Close, "移除", tint = DarkGray, modifier = Modifier.size(18.dp))
                                 }
                             }
-                            IconButton(onClick = { vm.removeTrack(playlistId, track.trackId) }) {
-                                Icon(Icons.Filled.Close, "移除", tint = DarkGray, modifier = Modifier.size(18.dp))
+
+                            // ── 排序按钮 ──
+                            if (!isPlaying) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.End,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("#${index + 1}", color = DarkGray, style = MaterialTheme.typography.labelSmall)
+                                    Spacer(Modifier.width(8.dp))
+                                    if (!isFirst) {
+                                        IconButton(
+                                            onClick = { vm.reorderTrack(playlistId, index, index - 1) },
+                                            modifier = Modifier.size(28.dp)
+                                        ) {
+                                            Icon(Icons.Filled.KeyboardArrowUp, "上移", tint = SilverGray, modifier = Modifier.size(18.dp))
+                                        }
+                                    } else {
+                                        Spacer(Modifier.size(28.dp))
+                                    }
+                                    if (!isLast) {
+                                        IconButton(
+                                            onClick = { vm.reorderTrack(playlistId, index, index + 1) },
+                                            modifier = Modifier.size(28.dp)
+                                        ) {
+                                            Icon(Icons.Filled.KeyboardArrowDown, "下移", tint = SilverGray, modifier = Modifier.size(18.dp))
+                                        }
+                                    } else {
+                                        Spacer(Modifier.size(28.dp))
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
         }
+    }
+
+    // ── 时长不匹配详情弹窗 ──
+    mismatchDialogTrack?.let { track ->
+        AlertDialog(
+            onDismissRequest = { mismatchDialogTrack = null },
+            containerColor = DarkStoneBrown,
+            title = { Text("时长不匹配", color = GoldAncient) },
+            text = {
+                Column {
+                    Text("音频时长:  ${formatTime(track.durationMs)}", color = SilverGray)
+                    Text("脚本时长:  ${formatTime(track.scriptDurationMs)}", color = SilverGray)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "差异:  ${formatTime(kotlin.math.abs(track.durationMs - track.scriptDurationMs))}",
+                        color = AlertRed
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "播放时将以音频实际时长为准，超出脚本范围的部分不输出设备指令。",
+                        color = DarkGray,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { mismatchDialogTrack = null }) {
+                    Text("知道了", color = GoldAncient)
+                }
+            }
+        )
+    }
+
+    // ── configId 不匹配警告弹窗 ──
+    configMismatchMsg?.let { msg ->
+        AlertDialog(
+            onDismissRequest = { configMismatchMsg = null },
+            containerColor = DarkStoneBrown,
+            title = { Text("配置不匹配", color = AlertRed) },
+            text = { Text(msg, color = SilverGray) },
+            confirmButton = {
+                TextButton(onClick = { configMismatchMsg = null }) {
+                    Text("知道了", color = GoldAncient)
+                }
+            }
+        )
     }
 }
 
@@ -169,12 +319,10 @@ private fun PlayerBar(vm: PlaySessionVM) {
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp, vertical = 6.dp)
         ) {
-            // 错误提示
             if (errorMsg != null) {
                 Text("⚠ $errorMsg", color = AlertRed, style = MaterialTheme.typography.labelSmall)
             }
 
-            // ── Seekbar ──
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(formatTime(position), color = DarkGray, style = MaterialTheme.typography.labelMedium)
                 Slider(
@@ -190,13 +338,11 @@ private fun PlayerBar(vm: PlaySessionVM) {
                 Text(formatTime(duration), color = DarkGray, style = MaterialTheme.typography.labelMedium)
             }
 
-            // ── Controls + Play mode ──
             Row(
                 Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
-                // Play mode
                 var modeExpanded by remember { mutableStateOf(false) }
                 Box {
                     TextButton(onClick = { modeExpanded = true }) {
@@ -214,12 +360,10 @@ private fun PlayerBar(vm: PlaySessionVM) {
                     }
                 }
 
-                // Prev
                 IconButton(onClick = { vm.playPrevious() }) {
                     Icon(Icons.Filled.ChevronLeft, "上一首", tint = SilverGray)
                 }
 
-                // Play/Pause/Loading
                 Button(
                     onClick = { vm.togglePlayPause() },
                     colors = ButtonDefaults.buttonColors(containerColor = BloodRed),
@@ -228,27 +372,17 @@ private fun PlayerBar(vm: PlaySessionVM) {
                     contentPadding = PaddingValues(0.dp)
                 ) {
                     if (isLoading) {
-                        CircularProgressIndicator(
-                            color = SilverGray,
-                            strokeWidth = 2.dp,
-                            modifier = Modifier.size(24.dp)
-                        )
+                        CircularProgressIndicator(color = SilverGray, strokeWidth = 2.dp, modifier = Modifier.size(24.dp))
                     } else {
-                        Text(if (playing) "⏸" else "▶", fontSize = MaterialTheme.typography.headlineMedium.fontSize)
+                        Text(if (playing) "\u23F8" else "\u25B6", fontSize = MaterialTheme.typography.headlineMedium.fontSize)
                     }
                 }
 
-                // Next
                 IconButton(onClick = { vm.playNext() }) {
                     Icon(Icons.Filled.ChevronRight, "下一首", tint = SilverGray)
                 }
 
-                // Track index
-                Text(
-                    trackIndexLabel(vm),
-                    color = DarkGray,
-                    style = MaterialTheme.typography.labelSmall
-                )
+                Text(trackIndexLabel(vm), color = DarkGray, style = MaterialTheme.typography.labelSmall)
             }
         }
     }

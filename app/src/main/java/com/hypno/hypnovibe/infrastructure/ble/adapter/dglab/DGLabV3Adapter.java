@@ -13,10 +13,10 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 
+import com.hypno.hypnovibe.app.manager.TimelineEngine;
 import com.hypno.hypnovibe.domain.AdapterStatus;
 import com.hypno.hypnovibe.domain.DeviceProtocolAdapter;
 
-import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -82,6 +82,11 @@ public class DGLabV3Adapter implements DeviceProtocolAdapter, DGLabController {
     private volatile int waveFreqB = 10;
     private volatile int waveStrengthB = 0;
 
+    // === Phase 6: Coordinator 驱动的关键帧缓存 ===
+    private volatile TimelineEngine.KeyframeResult cachedKfA;
+    private volatile TimelineEngine.KeyframeResult cachedKfB;
+    private volatile boolean coordinatorActive = false; // true = Coordinator 驱动，false = 手动测试面板
+
     public DGLabV3Adapter(String deviceId) {
         this.deviceId = deviceId;
     }
@@ -146,14 +151,32 @@ public class DGLabV3Adapter implements DeviceProtocolAdapter, DGLabController {
     }
 
     @Override
-    public void updateSnapshot(Map<String, byte[]> channelData,
-                               Map<String, Long> offsetsInSegment) {
-        // Phase 5.5 填充：从快照提取波形数据更新 waveDataA/waveDataB
+    public void updateKeyframe(String physicalChannelKey,
+                               TimelineEngine.KeyframeResult kf) {
+        coordinatorActive = true;
+        if ("A".equals(physicalChannelKey)) {
+            cachedKfA = kf;
+            waveModeA = true;
+            // strength: 0-100% → 0-200, freq: 10-1000 → protocol 10-240
+            waveStrengthA = kf.strength * 2;
+            waveFreqA = DGLabFrequencyConverter.toProtocol(kf.freq);
+        } else if ("B".equals(physicalChannelKey)) {
+            cachedKfB = kf;
+            waveModeB = true;
+            waveStrengthB = kf.strength * 2;
+            waveFreqB = DGLabFrequencyConverter.toProtocol(kf.freq);
+        }
     }
 
     @Override
     public void flush() {
-        // Phase 5.5 填充：清空波形缓冲
+        coordinatorActive = false;
+        cachedKfA = null;
+        cachedKfB = null;
+        waveModeA = false;
+        waveModeB = false;
+        // 发送静默帧
+        sendSilentFrame();
     }
 
     @Override

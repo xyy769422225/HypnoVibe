@@ -11,10 +11,10 @@ import android.os.ParcelUuid;
 import android.util.Log;
 
 import com.example.nirjon.bledemo4_advertising.util.BLEUtil;
+import com.hypno.hypnovibe.app.manager.TimelineEngine;
 import com.hypno.hypnovibe.domain.AdapterStatus;
 import com.hypno.hypnovibe.domain.DeviceProtocolAdapter;
 
-import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -54,6 +54,9 @@ public class LoveSpouseAdapter implements DeviceProtocolAdapter {
     // ===== 状态 =====
     private volatile int currentStrength = 0;
     private volatile String lastCommand = null;  // 记录最后发送的命令
+
+    // === Phase 6: Coordinator 驱动的关键帧缓存 ===
+    private volatile TimelineEngine.KeyframeResult cachedKf;
 
     public LoveSpouseAdapter(String deviceId) {
         this.deviceId = deviceId;
@@ -104,16 +107,30 @@ public class LoveSpouseAdapter implements DeviceProtocolAdapter {
         advertiser = null;
     }
 
-    @Override public void updateSnapshot(Map<String, byte[]> channelData,
-                                          Map<String, Long> offsetsInSegment) { /* Phase 5 */ }
+    @Override
+    public void updateKeyframe(String physicalChannelKey,
+                               TimelineEngine.KeyframeResult kf) {
+        if ("vibrate".equals(physicalChannelKey)) {
+            // 只在 level 变化时发送命令（去重逻辑）
+            if (cachedKf == null || cachedKf.level != kf.level) {
+                setStrength(kf.level);
+                cachedKf = kf;
+            }
+        }
+    }
 
-    @Override public void flush() { /* Phase 5 */ }
+    @Override
+    public void flush() {
+        cachedKf = null;
+        stop(); // 停止振动
+    }
 
     @SuppressLint("MissingPermission")
     @Override
     public void emergencyStop() {
         sendCommand(LoveSpouseConstants.STOP_ALL, LoveSpouseConstants.CommandType.STOP);
         currentStrength = 0;
+        cachedKf = null;
     }
 
     @Override public boolean validateSegmentData(byte[] protobufBytes) { return false; }

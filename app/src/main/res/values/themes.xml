@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-
-    <style name="Theme.HypnoVibe" parent="android:Theme.Material.Light.NoActionBar" />
+    <!-- Dark Dungeon 主题：深渊黑背景，沉浸式 -->
+    <style name="Theme.HypnoVibe" parent="android:Theme.Material.NoActionBar">
+        <item name="android:colorBackground">@color/abyss_black</item>
+        <item name="android:statusBarColor">@color/abyss_black</item>
+        <item name="android:navigationBarColor">@color/abyss_black</item>
+        <item name="android:windowBackground">@color/abyss_black</item>
+    </style>
 </resources>

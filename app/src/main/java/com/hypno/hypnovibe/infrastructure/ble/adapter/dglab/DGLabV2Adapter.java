@@ -13,6 +13,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 
+import com.hypno.hypnovibe.app.manager.TimelineEngine;
 import com.hypno.hypnovibe.domain.AdapterStatus;
 import com.hypno.hypnovibe.domain.DeviceProtocolAdapter;
 
@@ -135,8 +136,31 @@ public class DGLabV2Adapter implements DeviceProtocolAdapter, DGLabController {
 
     @Override public void release() { released = true; disconnect(); }
 
+    @Override
+    public void updateKeyframe(String physicalChannelKey,
+                               TimelineEngine.KeyframeResult kf) {
+        // V2 波形模式：频率→X/Y, 强度→Z
+        int freq = Math.max(10, Math.min(kf.freq, 240));
+        int str = Math.round((float) kf.strength * 7f / 100f); // 0-100% → 0-7
+        if ("A".equals(physicalChannelKey)) {
+            waveModeA = true;
+            waveFreqA = freq;
+            waveStrengthA = Math.min(str, 31);
+        } else if ("B".equals(physicalChannelKey)) {
+            waveModeB = true;
+            waveFreqB = freq;
+            waveStrengthB = Math.min(str, 31);
+        }
+    }
+
+    @Override
+    public void flush() {
+        waveModeA = false;
+        waveModeB = false;
+        sendSilentFrame();
+    }
+
     @Override public void updateSnapshot(Map<String, byte[]> channelData, Map<String, Long> offsets) {}
-    @Override public void flush() {}
     @Override public boolean validateSegmentData(byte[] data) { return false; }
 
     @Override

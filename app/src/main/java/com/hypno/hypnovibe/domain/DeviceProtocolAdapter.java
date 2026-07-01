@@ -1,6 +1,7 @@
 package com.hypno.hypnovibe.domain;
 
 import android.content.Context;
+import com.hypno.hypnovibe.app.manager.TimelineEngine;
 import java.util.Map;
 
 /**
@@ -24,19 +25,27 @@ public interface DeviceProtocolAdapter {
     /** 销毁适配器，释放所有资源（定时器、BLE连接、缓冲区） */
     void release();
 
-    // ===== 数据通道 =====
+    // ===== 数据通道（Phase 6）=====
+
     /**
-     * 接收最新的时间轴快照数据（由 PlaybackCoordinator 推送，~33ms）。
-     * Phase 5 填充实现，Phase 4 空实现。
+     * 接收单个物理通道的关键帧数据（由 PlaybackCoordinator 推送，~33ms）。
+     * Adapter 内部缓存此数据，在自身定时器中编码发送。
      */
-    void updateSnapshot(Map<String, byte[]> channelData,
-                        Map<String, Long> offsetsInSegment);
-    /** seek 时清空内部缓冲区，立即用新位置数据覆盖 */
+    void updateKeyframe(String physicalChannelKey, TimelineEngine.KeyframeResult kf);
+
+    /** seek / 暂停时清空内部缓存，Adapter 发送静默帧 */
     void flush();
+
     /** 安全停止，强度归零 */
     void emergencyStop();
 
     // ===== 校验 =====
     /** 校验段数据是否属于本设备类型。Phase 5 填充，Phase 4 返回 false。 */
     boolean validateSegmentData(byte[] protobufBytes);
+
+    // ===== 废弃（保留兼容）=====
+    /** @deprecated 使用 {@link #updateKeyframe} 替代 */
+    @Deprecated
+    default void updateSnapshot(Map<String, byte[]> channelData,
+                                Map<String, Long> offsetsInSegment) {}
 }

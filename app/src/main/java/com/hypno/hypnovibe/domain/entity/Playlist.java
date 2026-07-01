@@ -56,6 +56,7 @@ public class Playlist {
         private boolean autoMatched;
         private long durationMs;
         private boolean mismatch;
+        private long scriptDurationMs; // Phase 6: 关联时间轴脚本的总时长
 
         public Track() {}
 
@@ -86,6 +87,9 @@ public class Playlist {
 
         public boolean hasMismatch() { return mismatch; }
         public void setHasMismatch(boolean hasMismatch) { this.mismatch = hasMismatch; }
+
+        public long getScriptDurationMs() { return scriptDurationMs; }
+        public void setScriptDurationMs(long scriptDurationMs) { this.scriptDurationMs = scriptDurationMs; }
     }
 
     public static class ChannelMappingEntry {

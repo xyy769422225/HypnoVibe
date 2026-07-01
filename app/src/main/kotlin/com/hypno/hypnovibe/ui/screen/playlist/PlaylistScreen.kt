@@ -1,6 +1,7 @@
 package com.hypno.hypnovibe.ui.screen.playlist
 
 import android.widget.Toast
+import androidx.activity.ComponentActivity
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -26,8 +27,10 @@ import androidx.compose.runtime.getValue
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PlaylistScreen(navController: NavController) {
-    val vm: PlaySessionVM = viewModel()
+    val activity = LocalContext.current as ComponentActivity
+    val vm: PlaySessionVM = viewModel(viewModelStoreOwner = activity)
     val playlists by vm.getPlaylists().collectAsState()
+    val currentPlayingId by vm.getCurrentPlayingPlaylistId().collectAsState()
     val context = LocalContext.current
 
     var showNewDialog by remember { mutableStateOf(false) }
@@ -143,6 +146,7 @@ fun PlaylistScreen(navController: NavController) {
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(playlists, key = { it.id }) { playlist ->
+                    val isCurrentPlaying = playlist.id == currentPlayingId
                     StoneCard(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -156,8 +160,17 @@ fun PlaylistScreen(navController: NavController) {
                             modifier = Modifier.fillMaxWidth().padding(12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            if (isCurrentPlaying) {
+                                Icon(
+                                    Icons.Filled.PlayArrow,
+                                    contentDescription = "播放中",
+                                    tint = BloodRed,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                            }
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(playlist.name, color = GoldAncient)
+                                Text(playlist.name, color = if (isCurrentPlaying) BloodRed else GoldAncient)
                                 Text(
                                     "${playlist.tracks?.size ?: 0} 首曲目",
                                     color = DarkGray

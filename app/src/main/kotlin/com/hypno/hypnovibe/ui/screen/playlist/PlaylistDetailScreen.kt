@@ -2,6 +2,7 @@ package com.hypno.hypnovibe.ui.screen.playlist
 
 import android.media.MediaMetadataRetriever
 import android.provider.OpenableColumns
+import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -28,7 +29,8 @@ import androidx.compose.runtime.getValue
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PlaylistDetailScreen(playlistId: String, navController: NavController) {
-    val vm: PlaySessionVM = viewModel()
+    val activity = LocalContext.current as ComponentActivity
+    val vm: PlaySessionVM = viewModel(viewModelStoreOwner = activity)
     val current by vm.getCurrentPlaylist().collectAsState()
     val currentTrackIdx by vm.getCurrentTrackIndex().collectAsState()
     val isPlaying by vm.getIsPlayingState().collectAsState()
@@ -74,8 +76,11 @@ fun PlaylistDetailScreen(playlistId: String, navController: NavController) {
                     }) {
                         Icon(Icons.Filled.Settings, "通道映射", tint = SilverGray)
                     }
-                    IconButton(onClick = { audioPicker.launch(arrayOf("audio/*")) }) {
-                        Icon(Icons.Filled.Add, "添加曲目", tint = BloodRed)
+                    IconButton(
+                        onClick = { audioPicker.launch(arrayOf("audio/*")) },
+                        enabled = !isPlaying
+                    ) {
+                        Icon(Icons.Filled.Add, "添加曲目", tint = if (isPlaying) DarkGray else BloodRed)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = DarkStoneBrown)

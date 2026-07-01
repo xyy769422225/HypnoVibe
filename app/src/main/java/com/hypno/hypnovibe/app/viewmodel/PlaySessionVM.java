@@ -48,6 +48,7 @@ public class PlaySessionVM extends AndroidViewModel {
     private final MutableStateFlow<Boolean> isPlaying = StateFlowKt.MutableStateFlow(false);
     private final MutableStateFlow<Boolean> isLoading = StateFlowKt.MutableStateFlow(false);
     private final MutableStateFlow<String> errorMsg = StateFlowKt.MutableStateFlow((String) null);
+    private final MutableStateFlow<String> currentPlayingPlaylistId = StateFlowKt.MutableStateFlow((String) null);
 
     // 后台线程池：所有解码/IO 都在这里执行，绝不阻塞主线程
     private final ExecutorService ioExecutor = Executors.newSingleThreadExecutor(r -> {
@@ -75,6 +76,7 @@ public class PlaySessionVM extends AndroidViewModel {
     public StateFlow<Boolean> getIsLoading() { return isLoading; }
     public StateFlow<String> getErrorMsg() { return errorMsg; }
     public StateFlow<Integer> getCurrentTrackIndex() { return currentTrackIndex; }
+    public StateFlow<String> getCurrentPlayingPlaylistId() { return currentPlayingPlaylistId; }
 
     // ── 播放列表操作 ──
     public void loadPlaylists() { playlists.setValue(manager.listPlaylists()); }
@@ -93,7 +95,20 @@ public class PlaySessionVM extends AndroidViewModel {
     public void removeTrack(String playlistId, String trackId) { Playlist p = manager.removeTrack(playlistId, trackId); if (p != null) currentPlaylist.setValue(p); }
     public void setPlayMode(String mode) { Playlist p = currentPlaylist.getValue(); if (p != null) { p.setPlayMode(mode); manager.save(p); currentPlaylist.setValue(p); } }
     public void renamePlaylist(String id, String newName) { Playlist p = manager.findById(id); if (p != null) { manager.rename(p, newName); loadPlaylists(); } }
-    public void deletePlaylist(String id) { manager.deletePlaylist(id); currentPlaylist.setValue(null); loadPlaylists(); }
+    public void deletePlaylist(String id) {
+        manager.deletePlaylist(id);
+        if (id != null && id.equals(currentPlayingPlaylistId.getValue())) {
+            stopPositionPoller();
+            if (audioEngine != null) { audioEngine.release(); audioEngine = null; }
+            isPlaying.setValue(false);
+            currentTrackIndex.setValue(-1);
+            currentPlayingPlaylistId.setValue(null);
+            positionMs.setValue(0L);
+            durationMs.setValue(0L);
+        }
+        currentPlaylist.setValue(null);
+        loadPlaylists();
+    }
     public void savePlaylist(Playlist p) { manager.save(p); }
 
     // ══════════════════════════════════════════════════════
@@ -138,6 +153,7 @@ public class PlaySessionVM extends AndroidViewModel {
 
                 // 3. 开始播放
                 currentTrackIndex.setValue(trackIndex);
+                currentPlayingPlaylistId.setValue(pl.getId());
                 durationMs.setValue(audioEngine.getDurationMs());
                 audioEngine.play();
                 isPlaying.setValue(true);
@@ -193,7 +209,7 @@ public class PlaySessionVM extends AndroidViewModel {
         if (next >= pl.getTracks().size()) {
             if ("LOOP_LIST".equals(mode)) next = 0;
             else if ("LOOP_LAST".equals(mode)) { playTrack(idx); return; }
-            else { isPlaying.setValue(false); return; }
+            else { isPlaying.setValue(false); currentPlayingPlaylistId.setValue(null); return; }
         }
         playTrack(next);
     }

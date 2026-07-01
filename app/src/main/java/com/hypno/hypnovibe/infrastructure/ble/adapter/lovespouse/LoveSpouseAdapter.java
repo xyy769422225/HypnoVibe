@@ -12,6 +12,7 @@ import android.os.Looper;
 import android.os.ParcelUuid;
 import android.util.Log;
 
+import com.example.nirjon.bledemo4_advertising.util.BLEUtil;
 import com.hypno.hypnovibe.domain.AdapterStatus;
 import com.hypno.hypnovibe.domain.DeviceProtocolAdapter;
 
@@ -19,23 +20,21 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Love Spouse 设备适配器。
+ * Love Spouse 2.4G 设备适配器。
  * <p>
- * 通过 BLE Advertising 的 Manufacturer Data 控制 MuSe/Love Spouse 兼容玩具。
- * 与郊狼不同：不需要 GATT 连接，纯广播控制；玩具被动监听，一对一或一对多。
+ * 通过 libble.so JNI 编码 BLE 广播数据，控制 MuSe/Love Spouse 兼容玩具。
+ * 基于官方 Love Spouse APK v4.0.0 逆向实现，无需 GATT 配对。
  * <p>
- * 协议来源：LS-Buttplug + LoveSpouse-Vibration-Controller 两个开源项目。
+ * 广播机制：每次命令发送后约 1 秒自动停止，因此内部定时器每 900ms 重发
+ * 当前等级的广播包以维持持续振动。
  */
 public class LoveSpouseAdapter implements DeviceProtocolAdapter {
 
     private static final String TAG = "LoveSpouseAdapter";
 
-    // 任意 UUID 用于广播标识（Android BLE 广播要求至少含 Service UUID 或 Manufacturer Data）
+    /** 广播标识 UUID（官方 APK 从资源加载，此处用固定值） */
     private static final UUID ADVERTISE_SERVICE_UUID =
             UUID.fromString("0000fff0-0000-1000-8000-00805f9b34fb");
-
-    /** 广播超时设为 0 表示无限广播，由代码手动停止 */
-    private static final int ADVERTISE_TIMEOUT = 0;
 
     // ===== 标识 =====
     private final String deviceId;
@@ -44,21 +43,19 @@ public class LoveSpouseAdapter implements DeviceProtocolAdapter {
     private Context context;
     private AdapterStatus statusCallback;
     private BluetoothLeAdvertiser advertiser;
-    private AdvertiseCallback advertiseCallback;
+    private AdvertiseCallback currentCallback;
     private volatile boolean advertising = false;
     private volatile boolean released = false;
 
     // ===== 强度状态 =====
-    private volatile int currentLevel = 0;
+    private volatile int currentLevel = -1;  // -1 = 未初始化
     private volatile int targetLevel = 0;
 
-    // ===== 定时广播更新 =====
+    // ===== 定时器 =====
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
-    private Runnable updateRunnable;
+    private Runnable keepAliveRunnable;
+    private long lastBroadcastTime = 0;
 
-    /**
-     * @param deviceId 设备实例唯一ID
-     */
     public LoveSpouseAdapter(String deviceId) {
         this.deviceId = deviceId;
     }
@@ -95,21 +92,13 @@ public class LoveSpouseAdapter implements DeviceProtocolAdapter {
             return;
         }
 
-        startAdvertisingChannel(0); // 默认发送 Stop
+        // 初始发送停止命令（确保安全）
+        sendBroadcast(0);
+        currentLevel = 0;
+        targetLevel = 0;
 
-        // 启动定时更新任务
-        updateRunnable = new Runnable() {
-            @Override
-            public void run() {
-                if (released || !advertising) return;
-                if (currentLevel != targetLevel) {
-                    startAdvertisingChannel(targetLevel);
-                    currentLevel = targetLevel;
-                }
-                mainHandler.postDelayed(this, LoveSpouseConstants.ADVERTISE_UPDATE_MS);
-            }
-        };
-        mainHandler.post(updateRunnable);
+        // 启动持续广播保活定时器
+        startKeepAlive();
 
         notifyState(AdapterStatus.State.CONNECTED, "广播已开启");
     }
@@ -117,49 +106,42 @@ public class LoveSpouseAdapter implements DeviceProtocolAdapter {
     @SuppressLint("MissingPermission")
     @Override
     public void disconnect() {
-        stopAdvertising();
         released = true;
-        if (updateRunnable != null) {
-            mainHandler.removeCallbacks(updateRunnable);
-            updateRunnable = null;
-        }
+        stopKeepAlive();
+        stopAdvertising();
+        sendBroadcast(0); // 最后发送一次停止
         notifyState(AdapterStatus.State.DISCONNECTED, "广播已停止");
     }
 
     @Override
     public void release() {
         released = true;
+        stopKeepAlive();
         stopAdvertising();
-        if (updateRunnable != null) {
-            mainHandler.removeCallbacks(updateRunnable);
-            updateRunnable = null;
-        }
         advertiser = null;
     }
 
     @Override
     public void updateSnapshot(Map<String, byte[]> channelData,
                                Map<String, Long> offsetsInSegment) {
-        // Phase 5 填充：反序列化 protobuf 波形数据，映射为 0-9 强度等级
-        // Phase 4：暂不处理，仅通过 setManualStrength 手动控制
+        // Phase 5 填充
     }
 
     @Override
     public void flush() {
-        // Phase 5 填充：清空波形缓冲
+        // Phase 5 填充
     }
 
     @SuppressLint("MissingPermission")
     @Override
     public void emergencyStop() {
         targetLevel = 0;
-        startAdvertisingChannel(0);
+        sendBroadcast(0);
         currentLevel = 0;
     }
 
     @Override
     public boolean validateSegmentData(byte[] protobufBytes) {
-        // Phase 5 填充：校验 LovenseVibrateWaveform protobuf
         return false;
     }
 
@@ -167,57 +149,63 @@ public class LoveSpouseAdapter implements DeviceProtocolAdapter {
     //  测试面板手动控制 API
     // ══════════════════════════════════════════════════════
 
-    /**
-     * 手动设置振动等级（0-9）。
-     * <p>
-     * 定时器会在下一个周期（约50ms内）检测到变化并更新广播。
-     */
+    /** 设置振动等级（0-9） */
     public void setManualStrength(int level) {
         targetLevel = clamp(level, LoveSpouseConstants.STRENGTH_MIN, LoveSpouseConstants.STRENGTH_MAX);
     }
 
-    /** 获取当前广播的振动等级 */
     public int getCurrentLevel() {
         return currentLevel;
     }
 
     public boolean isAdvertising() {
-        return advertising;
+        return advertising && !released;
     }
 
     // ══════════════════════════════════════════════════════
-    //  内部：BLE 广播
+    //  内部：BLE 广播发送
     // ══════════════════════════════════════════════════════
 
     @SuppressLint("MissingPermission")
-    private void startAdvertisingChannel(int channelIndex) {
+    private void sendBroadcast(int level) {
         if (advertiser == null || released) return;
 
-        // 停止旧广播
-        if (advertising && advertiseCallback != null) {
-            try { advertiser.stopAdvertising(advertiseCallback); } catch (Exception ignored) {}
+        // 速率限制：同一等级 100ms 内不重发
+        long now = System.currentTimeMillis();
+        if (level == currentLevel && now - lastBroadcastTime < LoveSpouseConstants.BROADCAST_INTERVAL_MS) {
+            return;
         }
 
-        // 构建广播数据
-        byte[] manufacturerBytes = buildManufacturerData(channelIndex);
+        // 停止旧广播
+        stopAdvertising();
 
+        // JNI 编码
+        byte[] payload = buildRfPayload(level);
+
+        // 构建广播数据
         AdvertiseData data = new AdvertiseData.Builder()
                 .addServiceUuid(new ParcelUuid(ADVERTISE_SERVICE_UUID))
-                .addManufacturerData(LoveSpouseConstants.MANUFACTURER_ID, manufacturerBytes)
+                .addManufacturerData(LoveSpouseConstants.MANUFACTURER_ID, payload)
                 .build();
+
+        // 构建广播设置
+        int mode = (level == 0) ? LoveSpouseConstants.ADVERTISE_MODE_STOP
+                                : LoveSpouseConstants.ADVERTISE_MODE_POWER;
+        int advertiseMode = (mode == 1) ? AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY
+                                        : AdvertiseSettings.ADVERTISE_MODE_BALANCED;
+        int timeout = (mode == 1) ? 2000 : 3000;
 
         AdvertiseSettings settings = new AdvertiseSettings.Builder()
-                .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+                .setAdvertiseMode(advertiseMode)
+                .setConnectable(true)
+                .setTimeout(timeout)
                 .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
-                .setConnectable(false)
-                .setTimeout(ADVERTISE_TIMEOUT)
                 .build();
 
-        advertiseCallback = new AdvertiseCallback() {
+        currentCallback = new AdvertiseCallback() {
             @Override
             public void onStartSuccess(AdvertiseSettings settingsInEffect) {
                 advertising = true;
-                Log.d(TAG, "advertising started, channel=" + channelIndex);
             }
 
             @Override
@@ -231,48 +219,93 @@ public class LoveSpouseAdapter implements DeviceProtocolAdapter {
         };
 
         try {
-            advertiser.startAdvertising(settings, data, advertiseCallback);
+            advertiser.startAdvertising(settings, data, currentCallback);
+            advertising = true;
+            currentLevel = level;
+            lastBroadcastTime = now;
         } catch (Exception e) {
             Log.e(TAG, "startAdvertising exception", e);
             advertising = false;
-            notifyState(AdapterStatus.State.ERROR, "广播启动失败: " + e.getMessage());
         }
     }
 
     @SuppressLint("MissingPermission")
     private void stopAdvertising() {
         advertising = false;
-        if (advertiser != null && advertiseCallback != null) {
+        if (advertiser != null && currentCallback != null) {
             try {
-                advertiser.stopAdvertising(advertiseCallback);
+                advertiser.stopAdvertising(currentCallback);
             } catch (Exception ignored) {}
         }
-        advertiseCallback = null;
+        currentCallback = null;
     }
 
     // ══════════════════════════════════════════════════════
-    //  内部：数据构建
+    //  内部：持续广播保活
     // ══════════════════════════════════════════════════════
 
     /**
-     * 构建 Manufacturer Data 字节数组。
-     * <p>
-     * 格式：[8字节前缀] + [3字节通道值] = 11 字节
-     *
-     * @param channelIndex 通道索引 0-9
-     * @return 11 字节 manufacturer data
+     * 启动保活定时器。因为 BLE 广播约 1 秒后自动停止，需要每 900ms 重发
+     * 当前目标等级的广播包以维持持续振动。
      */
-    static byte[] buildManufacturerData(int channelIndex) {
-        int idx = clamp(channelIndex, 0, LoveSpouseConstants.CHANNELS.length - 1);
-        int channel = LoveSpouseConstants.CHANNELS[idx];
+    private void startKeepAlive() {
+        stopKeepAlive();
+        keepAliveRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (released) return;
+                sendBroadcast(targetLevel);
+                mainHandler.postDelayed(this, LoveSpouseConstants.ADVERTISE_STOP_DELAY_MS - 100);
+            }
+        };
+        mainHandler.post(keepAliveRunnable);
+    }
 
-        byte[] data = new byte[LoveSpouseConstants.DATA_LENGTH];
-        System.arraycopy(LoveSpouseConstants.PREFIX, 0, data, 0, LoveSpouseConstants.PREFIX.length);
-        data[8]  = (byte) ((channel >> 16) & 0xFF);
-        data[9]  = (byte) ((channel >> 8) & 0xFF);
-        data[10] = (byte) (channel & 0xFF);
+    private void stopKeepAlive() {
+        if (keepAliveRunnable != null) {
+            mainHandler.removeCallbacks(keepAliveRunnable);
+            keepAliveRunnable = null;
+        }
+    }
 
-        return data;
+    // ══════════════════════════════════════════════════════
+    //  内部：JNI 编码
+    // ══════════════════════════════════════════════════════
+
+    /**
+     * 通过 libble.so 的 get_rf_payload() 编码广播数据。
+     * <p>
+     * 数据格式：[5字节前缀 wbMSE] + [1字节命令] + [5字节 CRC/校验] = 11 字节。
+     *
+     * @param level 振动等级 0-9
+     * @return 编码后的广播 payload
+     */
+    static byte[] buildRfPayload(int level) {
+        int idx = clamp(level, 0, LoveSpouseConstants.STRENGTH_COMMANDS.length - 1);
+        String hexStr = LoveSpouseConstants.STRENGTH_COMMANDS[idx];
+
+        // 将 hex 字符串转换为单字节
+        byte cmdByte = hexToByte(hexStr);
+        byte[] cmd = new byte[] { cmdByte };
+
+        int outputLen = LoveSpouseConstants.PREFIX.length + 1 + LoveSpouseConstants.RF_PAYLOAD_OVERHEAD;
+        byte[] output = new byte[outputLen];
+
+        BLEUtil.get_rf_payload(
+            LoveSpouseConstants.PREFIX, LoveSpouseConstants.PREFIX.length,
+            cmd, 1,
+            output
+        );
+
+        return output;
+    }
+
+    /** hex 字符串 "11" → byte 0x11 */
+    private static byte hexToByte(String hex) {
+        if (hex.length() == 1) {
+            hex = "0" + hex;
+        }
+        return (byte) Integer.parseInt(hex, 16);
     }
 
     // ══════════════════════════════════════════════════════

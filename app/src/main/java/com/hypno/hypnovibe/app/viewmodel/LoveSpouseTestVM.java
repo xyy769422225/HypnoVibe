@@ -1,8 +1,6 @@
 package com.hypno.hypnovibe.app.viewmodel;
 
 import android.app.Application;
-import android.os.Handler;
-import android.os.Looper;
 
 import androidx.lifecycle.AndroidViewModel;
 
@@ -21,7 +19,6 @@ public class LoveSpouseTestVM extends AndroidViewModel {
 
     private LoveSpouseAdapter adapter;
     private DeviceManagerVM deviceManagerVM;
-    private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     private final MutableStateFlow<Integer> currentLevel = StateFlowKt.MutableStateFlow(0);
     private final MutableStateFlow<Boolean> isAdvertising = StateFlowKt.MutableStateFlow(false);
@@ -32,27 +29,20 @@ public class LoveSpouseTestVM extends AndroidViewModel {
         super(app);
     }
 
-    // ── StateFlow getters ──
     public StateFlow<Integer> getCurrentLevel() { return currentLevel; }
     public StateFlow<Boolean> getIsAdvertising() { return isAdvertising; }
     public StateFlow<String> getDeviceName() { return deviceName; }
     public StateFlow<String> getErrorMsg() { return errorMsg; }
 
-    /**
-     * 初始化：绑定 DeviceManagerVM 并尝试查找已存在的 adapter。
-     */
+    /** 初始化：绑定 DeviceManagerVM 并尝试查找已存在的 adapter */
     public void init(DeviceManagerVM dmVm, String deviceId, String name) {
         this.deviceManagerVM = dmVm;
         this.deviceName.setValue(name);
         tryBindAdapter(deviceId);
     }
 
-    /**
-     * 尝试从 connectedMap 绑定 adapter，失败则设置未连接状态。
-     */
     private void tryBindAdapter(String deviceId) {
         if (deviceManagerVM == null) return;
-
         var connected = deviceManagerVM.findDevice(deviceId);
         if (connected != null && connected.getAdapter() instanceof LoveSpouseAdapter) {
             this.adapter = (LoveSpouseAdapter) connected.getAdapter();
@@ -64,16 +54,13 @@ public class LoveSpouseTestVM extends AndroidViewModel {
         }
     }
 
-    // ── 广播控制 ──
-
-    /** 开启 BLE 广播（通过 DeviceManagerVM 创建 adapter 并启动） */
+    /** 开启 BLE 广播 */
     public void startBroadcast() {
         if (deviceManagerVM == null) return;
         clearError();
 
-        // 如果已有同类型虚拟设备在连接中，尝试绑定
-        var dmVm = deviceManagerVM;
-        var items = dmVm.getDeviceList().getValue();
+        // 检查是否已有已连接的虚拟设备
+        var items = deviceManagerVM.getDeviceList().getValue();
         if (items != null) {
             for (var item : items) {
                 if (item.isVirtual && item.deviceType.equals(DeviceManagerVM.TYPE_LOVE_SPOUSE)
@@ -84,22 +71,14 @@ public class LoveSpouseTestVM extends AndroidViewModel {
             }
         }
 
-        // 创建新的广播实例（异步，adapter 稍后在 CONNECTED 回调中可用）
-        dmVm.addBroadcastDevice(DeviceManagerVM.TYPE_LOVE_SPOUSE);
-
-        // 延迟轮询：等待 adapter 连接完成
-        pollForAdapter(0);
+        // 创建新广播实例
+        deviceManagerVM.addBroadcastDevice(DeviceManagerVM.TYPE_LOVE_SPOUSE);
+        // 延迟绑定（addBroadcastDevice 内部 connect 是同步的，回调在 connectedMap 中）
+        mainHandler.postDelayed(() -> tryBindAdapterFromList(), 300);
     }
 
-    private void pollForAdapter(int attempt) {
-        if (attempt > 15) { // 最多等 3 秒（15 * 200ms）
-            errorMsg.setValue("广播启动超时，请重试");
-            isAdvertising.setValue(false);
-            return;
-        }
-
-        var dmVm = deviceManagerVM;
-        var items = dmVm.getDeviceList().getValue();
+    private void tryBindAdapterFromList() {
+        var items = deviceManagerVM.getDeviceList().getValue();
         if (items != null) {
             for (var item : items) {
                 if (item.isVirtual && item.deviceType.equals(DeviceManagerVM.TYPE_LOVE_SPOUSE)
@@ -109,9 +88,9 @@ public class LoveSpouseTestVM extends AndroidViewModel {
                 }
             }
         }
-
-        mainHandler.postDelayed(() -> pollForAdapter(attempt + 1), 200);
     }
+
+    private final android.os.Handler mainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
 
     /** 停止广播 */
     public void stopBroadcast() {
@@ -131,14 +110,13 @@ public class LoveSpouseTestVM extends AndroidViewModel {
         currentLevel.setValue(0);
     }
 
-    // ── 强度控制 ──
-
     /** 设置振动等级（0-9） */
     public void setStrength(int level) {
+        int clamped = Math.max(0, Math.min(9, level));
         if (adapter != null) {
-            adapter.setManualStrength(level);
+            adapter.setManualStrength(clamped);
         }
-        currentLevel.setValue(level);
+        currentLevel.setValue(clamped);
     }
 
     public void clearError() {
@@ -148,6 +126,5 @@ public class LoveSpouseTestVM extends AndroidViewModel {
     @Override
     protected void onCleared() {
         super.onCleared();
-        mainHandler.removeCallbacksAndMessages(null);
     }
 }

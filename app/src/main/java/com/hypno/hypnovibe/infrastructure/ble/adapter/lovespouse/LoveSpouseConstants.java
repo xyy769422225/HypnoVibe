@@ -1,10 +1,12 @@
 package com.hypno.hypnovibe.infrastructure.ble.adapter.lovespouse;
 
 /**
- * Love Spouse 协议常量。
+ * Love Spouse 2.4G BLE 广播协议常量。
  * <p>
- * 基于 LS-Buttplug 和 LoveSpouse-Vibration-Controller 两个开源项目逆向。
- * package-private，仅 lovespouse 子包内部使用。
+ * 基于官方 Love Spouse APK (v4.0.0) 逆向分析，通过 libble.so JNI 编码。
+ * <p>
+ * 协议特点：无需 GATT 配对，纯 BLE 广播控制；
+ * 广播自动超时 1 秒，需周期性重发维持控制。
  */
 final class LoveSpouseConstants {
 
@@ -15,50 +17,49 @@ final class LoveSpouseConstants {
 
     // ===== BLE 广播参数 =====
 
-    /** Manufacturer ID */
-    static final int MANUFACTURER_ID = 0xFFF0;
+    /** Manufacturer ID（官方 APK 使用 0x00FF = 255） */
+    static final int MANUFACTURER_ID = 0x00FF;
 
-    /** 制造商数据固定前缀（协议标识，非设备ID） */
+    /**
+     * 广播前缀（官方 APK 默认值）。
+     * ASCII "wbMSE" = {0x77, 0x62, 0x4D, 0x53, 0x45}，5 字节。
+     * 设备 BarCode=5342/3747 使用特殊格式，5787 使用此默认值。
+     */
     static final byte[] PREFIX = {
-        (byte) 0x6D, (byte) 0xB6, (byte) 0x43, (byte) 0xCE,
-        (byte) 0x97, (byte) 0xFE, (byte) 0x42, (byte) 0x7C
+        (byte) 0x77, (byte) 0x62, (byte) 0x4D, (byte) 0x53, (byte) 0x45
     };
 
-    /** 制造商数据总长度：前缀(8) + 命令(3) = 11 */
-    static final int DATA_LENGTH = 11;
+    /** JNI 编码额外输出字节数（CRC/校验码） */
+    static final int RF_PAYLOAD_OVERHEAD = 5;
 
-    // ===== 振动等级通道值（来源：LS-Buttplug LS.h） =====
+    // ===== 振动等级映射 =====
 
-    static final int CHANNEL_STOP = 0;  // 停止
-    static final int CHANNEL_L1   = 1;
-    static final int CHANNEL_L2   = 2;
-    static final int CHANNEL_L3   = 3;
-    static final int CHANNEL_L4   = 4;
-    static final int CHANNEL_L5   = 5;
-    static final int CHANNEL_L6   = 6;
-    static final int CHANNEL_L7   = 7;
-    static final int CHANNEL_L8   = 8;
-    static final int CHANNEL_L9   = 9;
-
-    /** 3字节通道值数组，按等级索引 */
-    static final int[] CHANNELS = {
-        0xE50000, // Stop
-        0xF40000, // L1
-        0xF70000, // L2
-        0xF60000, // L3
-        0xF10000, // L4
-        0xF00000, // L5
-        0xF30000, // L6
-        0xE70000, // L7
-        0xFC0000, // L8
-        0xE60000, // L9
+    /** 强度 0-9 对应的 hex 命令字符串（官方 APK CommonClassicMode.V() + s()） */
+    static final String[] STRENGTH_COMMANDS = {
+        "00",   // 0 = 停止
+        "11",   // 1
+        "12",   // 2
+        "13",   // 3
+        "14",   // 4
+        "15",   // 5
+        "16",   // 6
+        "17",   // 7
+        "18",   // 8
+        "19",   // 9
     };
 
-    // ===== 振动等级范围 =====
     static final int STRENGTH_MIN = 0;
     static final int STRENGTH_MAX = 9;
 
-    // ===== 广播更新周期 =====
-    /** 广播数据更新间隔（ms），LS-Buttplug 原为 20ms，这里放宽到 50ms */
-    static final long ADVERTISE_UPDATE_MS = 50;
+    // ===== 广播参数 =====
+
+    /** 广播超时（ms），0=无限，官方 Timer 在 1000ms 后停止 */
+    static final long ADVERTISE_STOP_DELAY_MS = 1000;
+
+    /** 广播更新间隔（ms），至少 60ms 以上 */
+    static final long BROADCAST_INTERVAL_MS = 100;
+
+    /** 广播模式 type：1=低延迟, 2=均衡（官方强度用 1，停止用 2） */
+    static final int ADVERTISE_MODE_POWER = 1;
+    static final int ADVERTISE_MODE_STOP = 2;
 }

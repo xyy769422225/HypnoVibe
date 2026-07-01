@@ -3,11 +3,14 @@ package com.hypno.hypnovibe.ui.screen.device
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -17,6 +20,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -29,6 +33,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * DG-LAB 测试面板。
@@ -40,13 +45,11 @@ fun DGLabTestScreen(deviceId: String, navController: NavController) {
     val deviceVm = rememberDeviceManagerVM()
     val testVm: DGLabTestVM = viewModel()
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
 
     val targetA by testVm.getTargetStrengthA().collectAsState()
     val targetB by testVm.getTargetStrengthB().collectAsState()
     val deviceA by testVm.getDeviceStrengthA().collectAsState()
     val deviceB by testVm.getDeviceStrengthB().collectAsState()
-    val safetyOn by testVm.getSafetyOn().collectAsState()
     val isConnected by testVm.getIsConnected().collectAsState()
     val deviceName by testVm.getDeviceName().collectAsState()
     val channelAEnabled by testVm.getChannelAEnabled().collectAsState()
@@ -140,10 +143,10 @@ fun DGLabTestScreen(deviceId: String, navController: NavController) {
             }
 
             when (tabIndex) {
-                0 -> ChannelTabA(testVm, targetA, deviceA, channelAEnabled, safetyOn,
-                    waveforms, selectedWaveA, playingA, progressA, context, scope)
-                1 -> ChannelTabB(testVm, targetB, deviceB, channelBEnabled, safetyOn,
-                    waveforms, selectedWaveB, playingB, progressB, context, scope)
+                0 -> ChannelTabA(testVm, targetA, deviceA, channelAEnabled,
+                    waveforms, selectedWaveA, playingA, progressA)
+                1 -> ChannelTabB(testVm, targetB, deviceB, channelBEnabled,
+                    waveforms, selectedWaveB, playingB, progressB)
             }
         }
     }
@@ -152,35 +155,84 @@ fun DGLabTestScreen(deviceId: String, navController: NavController) {
 @Composable
 private fun ChannelTabA(
     testVm: DGLabTestVM, target: Int, device: Int,
-    enabled: Boolean, safetyOn: Boolean,
+    enabled: Boolean,
     waveforms: List<DGLabTestVM.WaveEntry>, selectedIdx: Int,
-    playing: Boolean, progress: Float,
-    context: android.content.Context, scope: kotlinx.coroutines.CoroutineScope
+    playing: Boolean, progress: Float
 ) {
     Column(
         modifier = Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // 开关 + 强度条
+        // 控制面板：启动/停止 + 强度
         StoneCard {
-            Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("A 通道", color = GoldAncient, style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.weight(1f))
-                Switch(checked = enabled, onCheckedChange = { testVm.toggleChannelA() },
-                    colors = SwitchDefaults.colors(checkedThumbColor = BloodRed, checkedTrackColor = BloodRed.copy(alpha = 0.3f)))
-            }
-            if (enabled) {
+            Column(Modifier.fillMaxWidth().padding(12.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("A 通道", color = GoldAncient, style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.weight(1f))
+                    Switch(
+                        checked = enabled,
+                        onCheckedChange = { if (it) testVm.startChannelA() else testVm.stopChannelA() },
+                        colors = SwitchDefaults.colors(checkedThumbColor = BloodRed, checkedTrackColor = BloodRed.copy(alpha = 0.3f))
+                    )
+                }
+
                 Spacer(Modifier.height(8.dp))
-                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    HoldButton2(text = "－", enabled = !safetyOn, onChange = { testVm.decreaseChannelA() }, Modifier.size(40.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Column(Modifier.weight(1f)) {
-                        LinearProgressIndicator(progress = target / 200f, modifier = Modifier.fillMaxWidth().height(6.dp), color = BloodRed, trackColor = LeatherBrown)
-                        Text("$target/200", color = SilverGray, style = MaterialTheme.typography.labelMedium)
-                        Text("回报: $device", color = DarkGray, style = MaterialTheme.typography.labelSmall)
+
+                // 启动 / 停止按钮
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    DungeonButton(
+                        text = "▶ 启动",
+                        onClick = { testVm.startChannelA() },
+                        variant = ButtonVariant.PRIMARY,
+                        modifier = Modifier.weight(1f),
+                        enabled = !enabled
+                    )
+                    DungeonButton(
+                        text = "■ 停止",
+                        onClick = { testVm.stopChannelA() },
+                        variant = ButtonVariant.DANGER,
+                        modifier = Modifier.weight(1f),
+                        enabled = enabled
+                    )
+                }
+
+                // 强度控制（通道启动后可见）
+                if (enabled) {
+                    Spacer(Modifier.height(10.dp))
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        AccelHoldButton(
+                            text = "－",
+                            onChange = { testVm.decreaseChannelA() },
+                            modifier = Modifier.size(44.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Column(Modifier.weight(1f)) {
+                            LinearProgressIndicator(
+                                progress = target / 200f,
+                                modifier = Modifier.fillMaxWidth().height(6.dp),
+                                color = BloodRed,
+                                trackColor = LeatherBrown
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                "$target/200",
+                                color = SilverGray,
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                            Text(
+                                "回报: $device",
+                                color = DarkGray,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        AccelHoldButton(
+                            text = "＋",
+                            onChange = { testVm.increaseChannelA() },
+                            modifier = Modifier.size(44.dp),
+                            isPrimary = true
+                        )
                     }
-                    Spacer(Modifier.width(8.dp))
-                    HoldButton2(text = "＋", enabled = !safetyOn, onChange = { testVm.increaseChannelA() }, Modifier.size(40.dp), isPrimary = true)
                 }
             }
         }
@@ -188,61 +240,12 @@ private fun ChannelTabA(
         GothicDivider()
 
         // 波形列表
-        Text("波形选择", color = SilverGray, style = MaterialTheme.typography.titleMedium)
-        if (waveforms.isEmpty()) {
-            Text("点击右上角导入 .pulse 文件", color = DarkGray, style = MaterialTheme.typography.labelSmall)
-        } else {
-            // 当前播放进度
-            if (playing) {
-                LinearProgressIndicator(progress = progress, modifier = Modifier.fillMaxWidth(), color = GoldAncient, trackColor = LeatherBrown)
-                Text("播放中...", color = GoldAncient, style = MaterialTheme.typography.labelSmall)
-            }
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.heightIn(max = 300.dp)) {
-                itemsIndexed(waveforms) { idx, wave ->
-                    val isSelected = idx == selectedIdx
-                    StoneCard(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .then(
-                                if (isSelected) Modifier
-                                else Modifier
-                            )
-                    ) {
-                        Row(
-                            Modifier.fillMaxWidth().padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                if (isSelected) Icons.Filled.MusicNote else Icons.Filled.GraphicEq,
-                                contentDescription = null,
-                                tint = if (isSelected) BloodRed else DarkGray,
-                                modifier = Modifier.size(24.dp)
-                            )
-                            Spacer(Modifier.width(12.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text(wave.name, color = if (isSelected) GoldAncient else SilverGray)
-                                val frames = wave.data.getTotalFrames()
-                                val durationSec = frames / 10
-                                Text("${frames}帧 / ~${durationSec}s", color = DarkGray, style = MaterialTheme.typography.labelSmall)
-                            }
-                            TextButton(onClick = { testVm.selectAndPlayWaveformA(idx) }) {
-                                Text(if (isSelected && playing) "播放中" else "播放", color = BloodRed)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Spacer(Modifier.height(8.dp))
-        DungeonButton(
-            text = if (safetyOn) "🔓 解锁安全锁" else "🔴 紧急停止",
-            variant = if (safetyOn) ButtonVariant.SECONDARY else ButtonVariant.DANGER,
-            onClick = {
-                if (safetyOn) { testVm.unlockSafety(); Toast.makeText(context, "已解锁", Toast.LENGTH_SHORT).show() }
-                else { testVm.emergencyStop(); Toast.makeText(context, "已停止", Toast.LENGTH_SHORT).show() }
-            },
-            modifier = Modifier.fillMaxWidth()
+        ChannelWaveformList(
+            waveforms = waveforms,
+            selectedIdx = selectedIdx,
+            playing = playing,
+            progress = progress,
+            onPlay = { testVm.selectAndPlayWaveformA(it) }
         )
     }
 }
@@ -250,100 +253,246 @@ private fun ChannelTabA(
 @Composable
 private fun ChannelTabB(
     testVm: DGLabTestVM, target: Int, device: Int,
-    enabled: Boolean, safetyOn: Boolean,
+    enabled: Boolean,
     waveforms: List<DGLabTestVM.WaveEntry>, selectedIdx: Int,
-    playing: Boolean, progress: Float,
-    context: android.content.Context, scope: kotlinx.coroutines.CoroutineScope
+    playing: Boolean, progress: Float
 ) {
     Column(
         modifier = Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        // 控制面板：启动/停止 + 强度
         StoneCard {
-            Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("B 通道", color = GoldAncient, style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.weight(1f))
-                Switch(checked = enabled, onCheckedChange = { testVm.toggleChannelB() },
-                    colors = SwitchDefaults.colors(checkedThumbColor = BloodRed, checkedTrackColor = BloodRed.copy(alpha = 0.3f)))
-            }
-            if (enabled) {
+            Column(Modifier.fillMaxWidth().padding(12.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("B 通道", color = GoldAncient, style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.weight(1f))
+                    Switch(
+                        checked = enabled,
+                        onCheckedChange = { if (it) testVm.startChannelB() else testVm.stopChannelB() },
+                        colors = SwitchDefaults.colors(checkedThumbColor = BloodRed, checkedTrackColor = BloodRed.copy(alpha = 0.3f))
+                    )
+                }
+
                 Spacer(Modifier.height(8.dp))
-                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    HoldButton2(text = "－", enabled = !safetyOn, onChange = { testVm.decreaseChannelB() }, Modifier.size(40.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Column(Modifier.weight(1f)) {
-                        LinearProgressIndicator(progress = target / 200f, modifier = Modifier.fillMaxWidth().height(6.dp), color = BloodRed, trackColor = LeatherBrown)
-                        Text("$target/200", color = SilverGray, style = MaterialTheme.typography.labelMedium)
-                        Text("回报: $device", color = DarkGray, style = MaterialTheme.typography.labelSmall)
+
+                // 启动 / 停止按钮
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    DungeonButton(
+                        text = "▶ 启动",
+                        onClick = { testVm.startChannelB() },
+                        variant = ButtonVariant.PRIMARY,
+                        modifier = Modifier.weight(1f),
+                        enabled = !enabled
+                    )
+                    DungeonButton(
+                        text = "■ 停止",
+                        onClick = { testVm.stopChannelB() },
+                        variant = ButtonVariant.DANGER,
+                        modifier = Modifier.weight(1f),
+                        enabled = enabled
+                    )
+                }
+
+                // 强度控制（通道启动后可见）
+                if (enabled) {
+                    Spacer(Modifier.height(10.dp))
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        AccelHoldButton(
+                            text = "－",
+                            onChange = { testVm.decreaseChannelB() },
+                            modifier = Modifier.size(44.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Column(Modifier.weight(1f)) {
+                            LinearProgressIndicator(
+                                progress = target / 200f,
+                                modifier = Modifier.fillMaxWidth().height(6.dp),
+                                color = BloodRed,
+                                trackColor = LeatherBrown
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                "$target/200",
+                                color = SilverGray,
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                            Text(
+                                "回报: $device",
+                                color = DarkGray,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        AccelHoldButton(
+                            text = "＋",
+                            onChange = { testVm.increaseChannelB() },
+                            modifier = Modifier.size(44.dp),
+                            isPrimary = true
+                        )
                     }
-                    Spacer(Modifier.width(8.dp))
-                    HoldButton2(text = "＋", enabled = !safetyOn, onChange = { testVm.increaseChannelB() }, Modifier.size(40.dp), isPrimary = true)
                 }
             }
         }
 
         GothicDivider()
 
-        Text("波形选择", color = SilverGray, style = MaterialTheme.typography.titleMedium)
-        if (waveforms.isEmpty()) {
-            Text("点击右上角导入 .pulse 文件", color = DarkGray, style = MaterialTheme.typography.labelSmall)
-        } else {
-            if (playing) {
-                LinearProgressIndicator(progress = progress, modifier = Modifier.fillMaxWidth(), color = GoldAncient, trackColor = LeatherBrown)
-                Text("播放中...", color = GoldAncient, style = MaterialTheme.typography.labelSmall)
-            }
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.heightIn(max = 300.dp)) {
-                itemsIndexed(waveforms) { idx, wave ->
-                    val isSelected = idx == selectedIdx
-                    StoneCard(modifier = Modifier.fillMaxWidth()) {
-                        Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(if (isSelected) Icons.Filled.MusicNote else Icons.Filled.GraphicEq,
-                                contentDescription = null, tint = if (isSelected) BloodRed else DarkGray,
-                                modifier = Modifier.size(24.dp))
-                            Spacer(Modifier.width(12.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text(wave.name, color = if (isSelected) GoldAncient else SilverGray)
-                                Text("${wave.data.getTotalFrames()}帧 / ~${wave.data.getTotalFrames() / 10}s", color = DarkGray, style = MaterialTheme.typography.labelSmall)
-                            }
-                            TextButton(onClick = { testVm.selectAndPlayWaveformB(idx) }) {
-                                Text(if (isSelected && playing) "播放中" else "播放", color = BloodRed)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Spacer(Modifier.height(8.dp))
-        DungeonButton(
-            text = if (safetyOn) "🔓 解锁安全锁" else "🔴 紧急停止",
-            variant = if (safetyOn) ButtonVariant.SECONDARY else ButtonVariant.DANGER,
-            onClick = {
-                if (safetyOn) { testVm.unlockSafety(); Toast.makeText(context, "已解锁", Toast.LENGTH_SHORT).show() }
-                else { testVm.emergencyStop(); Toast.makeText(context, "已停止", Toast.LENGTH_SHORT).show() }
-            },
-            modifier = Modifier.fillMaxWidth()
+        // 波形列表
+        ChannelWaveformList(
+            waveforms = waveforms,
+            selectedIdx = selectedIdx,
+            playing = playing,
+            progress = progress,
+            onPlay = { testVm.selectAndPlayWaveformB(it) }
         )
     }
 }
 
+/**
+ * 加速长按按钮：点击变化1，按住从每秒+1逐渐加速到每秒+5。
+ */
 @Composable
-private fun HoldButton2(
-    text: String, enabled: Boolean, onChange: () -> Unit,
-    modifier: Modifier = Modifier, isPrimary: Boolean = false
+private fun AccelHoldButton(
+    text: String,
+    onChange: () -> Unit,
+    modifier: Modifier = Modifier,
+    isPrimary: Boolean = false
 ) {
     val scope = rememberCoroutineScope()
     var pressed by remember { mutableStateOf(false) }
-    val bg = when { !enabled -> DarkGray; isPrimary -> BloodRed; else -> DarkCopper }
-    Surface(color = bg, shape = MaterialTheme.shapes.small,
-        modifier = modifier.pointerInput(enabled) {
-            if (!enabled) return@pointerInput
-            detectTapGestures(onPress = {
-                pressed = true; onChange()
-                val job = scope.launch(Dispatchers.Default) { delay(500); while (isActive && pressed) { onChange(); delay(500) } }
-                tryAwaitRelease(); pressed = false; job.cancel()
-            })
-        }) {
-        Box(contentAlignment = Alignment.Center) { Text(text, color = SilverGray, fontSize = 16.sp) }
+    val bg = if (isPrimary) BloodRed else DarkCopper
+    Surface(
+        color = bg,
+        shape = MaterialTheme.shapes.small,
+        modifier = modifier.pointerInput(Unit) {
+            detectTapGestures(
+                onPress = {
+                    pressed = true
+                    onChange()
+                    // 初始等待 600ms 后开始重复
+                    val released = withTimeoutOrNull(600) { tryAwaitRelease(); true }
+                    if (released == null) {
+                        // 从 1000ms 逐渐加速到 200ms（最快每秒5次）
+                        val job = scope.launch(Dispatchers.Default) {
+                            var delayMs = 1000L
+                            while (isActive && pressed) {
+                                onChange()
+                                delay(delayMs)
+                                delayMs = maxOf(200L, delayMs - 50L)
+                            }
+                        }
+                        tryAwaitRelease()
+                        pressed = false
+                        job.cancel()
+                    } else {
+                        pressed = false
+                    }
+                }
+            )
+        }
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Text(text, color = SilverGray, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+/**
+ * 紧凑型波形列表：小条目、播放中波形换色高亮。
+ */
+@Composable
+private fun ChannelWaveformList(
+    waveforms: List<DGLabTestVM.WaveEntry>,
+    selectedIdx: Int,
+    playing: Boolean,
+    progress: Float,
+    onPlay: (Int) -> Unit
+) {
+    Text("波形选择", color = SilverGray, style = MaterialTheme.typography.titleMedium)
+
+    if (waveforms.isEmpty()) {
+        Text("点击右上角导入 .pulse 文件", color = DarkGray, style = MaterialTheme.typography.labelSmall)
+        return
+    }
+
+    // 播放进度条
+    if (playing) {
+        LinearProgressIndicator(
+            progress = progress,
+            modifier = Modifier.fillMaxWidth(),
+            color = GoldAncient,
+            trackColor = LeatherBrown
+        )
+    }
+
+    LazyColumn(
+        verticalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        itemsIndexed(waveforms) { idx, wave ->
+            val isSelected = idx == selectedIdx
+            val isActive = isSelected && playing
+            CompactWaveItem(
+                wave = wave,
+                isActive = isActive,
+                isSelected = isSelected,
+                onClick = { onPlay(idx) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun CompactWaveItem(
+    wave: DGLabTestVM.WaveEntry,
+    isActive: Boolean,
+    isSelected: Boolean,
+    onClick: () -> Unit
+) {
+    val bgColor = when {
+        isActive -> BloodRed.copy(alpha = 0.18f)
+        isSelected -> DarkCopper.copy(alpha = 0.12f)
+        else -> StoneGray.copy(alpha = 0.3f)
+    }
+    val borderColor = when {
+        isActive -> BloodRed
+        isSelected -> GoldAncient.copy(alpha = 0.4f)
+        else -> DarkCopper.copy(alpha = 0.3f)
+    }
+    val nameColor = when {
+        isActive -> GoldAncient
+        isSelected -> SilverGray
+        else -> DarkGray
+    }
+
+    Surface(
+        color = bgColor,
+        shape = RoundedCornerShape(4.dp),
+        border = BorderStroke(1.dp, borderColor),
+        modifier = Modifier.fillMaxWidth().clickable { onClick() }
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            val iconColor = if (isActive) BloodRed else DarkGray
+            Text(
+                text = if (isActive) "▶" else "●",
+                color = iconColor,
+                fontSize = 11.sp
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = wave.name,
+                color = nameColor,
+                fontSize = 13.sp,
+                modifier = Modifier.weight(1f)
+            )
+            val durationSec = wave.data.getTotalFrames() / 10
+            Text(
+                text = "~${durationSec}s",
+                color = DarkGray,
+                fontSize = 11.sp
+            )
+        }
     }
 }

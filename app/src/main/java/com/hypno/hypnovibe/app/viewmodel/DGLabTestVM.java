@@ -159,7 +159,42 @@ public class DGLabTestVM extends AndroidViewModel {
         }
     }
 
-    // ── 安全 ──
+    // ── 启动/停止（整合安全锁） ──
+    public void startChannelA() {
+        if (safetyOn.getValue() && controller != null) {
+            controller.unlockSafety();
+        }
+        safetyOn.setValue(false);
+        if (!channelAEnabled.getValue()) {
+            channelAEnabled.setValue(true);
+        }
+        if (controller != null) controller.setManualStrength(targetStrengthA.getValue(), targetStrengthB.getValue());
+    }
+    public void startChannelB() {
+        if (safetyOn.getValue() && controller != null) {
+            controller.unlockSafety();
+        }
+        safetyOn.setValue(false);
+        if (!channelBEnabled.getValue()) {
+            channelBEnabled.setValue(true);
+        }
+        if (controller != null) controller.setManualStrength(targetStrengthA.getValue(), targetStrengthB.getValue());
+    }
+
+    public void stopChannelA() {
+        stopWaveformA();
+        targetStrengthA.setValue(0);
+        channelAEnabled.setValue(false);
+        if (controller != null) controller.setManualStrength(0, targetStrengthB.getValue());
+    }
+    public void stopChannelB() {
+        stopWaveformB();
+        targetStrengthB.setValue(0);
+        channelBEnabled.setValue(false);
+        if (controller != null) controller.setManualStrength(targetStrengthA.getValue(), 0);
+    }
+
+    // ── 安全（保留紧急停止用于 DisposableEffect 等场景） ──
     public void unlockSafety() { if (controller != null) controller.unlockSafety(); safetyOn.setValue(false); }
     public void emergencyStop() {
         stopWaveformA();
